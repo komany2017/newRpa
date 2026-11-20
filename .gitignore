@@ -1,0 +1,35 @@
+# ---- 构建输出 ----
+build-mingw/
+bin/
+lib/
+*.dll
+*.exe
+*.lib
+*.a
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# ---- 下载数据与运行状态 ----
+downloads/
+logs/
+state/
+北京银行流水下载*/
+*.xlsx
+*.xls
+*.dlz
+*.zip
+*.csv
+
+# ---- 日志与临时文件 ----
+*.log
+*.tmp
+*.bak
+gdb_check.txt
+
+# ---- 系统/编辑器 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/ipch/

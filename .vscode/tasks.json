@@ -1,0 +1,111 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        // =================================================================
+        // 1. CMake Configure (Debug) — 只在第一次或 CMakeLists.txt 变了时手动跑
+        // =================================================================
+        {
+            "label": "CMake: configure (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-G", "MinGW Makefiles",
+                "-S", "${workspaceFolder}",
+                "-B", "${workspaceFolder}/build-mingw",
+                "-DCMAKE_CXX_COMPILER=g++",
+                "-DCMAKE_MAKE_PROGRAM=mingw32-make",
+                "-DCMAKE_BUILD_TYPE=Debug"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
+                }
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+
+        // =================================================================
+        // 2. Build (Debug) — 不依赖 configure，增量编译
+        //    （configure 已经在 build-mingw/ 里生成过一次 Makefile 就行）
+        // =================================================================
+        {
+            "label": "CMake: build (Debug)",
+            "type": "shell",
+            "command": "mingw32-make",
+            "args": ["-C", "${workspaceFolder}/build-mingw", "-j4"],
+            "options": {
+                "env": {
+                    "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
+                }
+            },
+            "problemMatcher": ["$gcc", "$mingw"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+
+        // =================================================================
+        // 3. 插件 DLL 自动复制到 bin/plugins — build 完自动跑
+        // =================================================================
+        {
+            "label": "Copy DLLs to plugins/",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-Command",
+                "$dst='${workspaceFolder}/build-mingw/bin/plugins'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Get-ChildItem '${workspaceFolder}/build-mingw/bin/*.dll' | ForEach-Object { Copy-Item $_.FullName $dst -Force; Write-Host \"Copy $($_.Name) -> plugins/\" }"
+            ],
+            "problemMatcher": [],
+            "dependsOn": "CMake: build (Debug)"
+        },
+
+        // =================================================================
+        // 4. preLaunchTask 组合：build + copy dlls
+        // =================================================================
+        {
+            "label": "Build + Copy DLLs",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "CMake: build (Debug)",
+                "Copy DLLs to plugins/"
+            ],
+            "problemMatcher": []
+        },
+
+        // =================================================================
+        // 5. 启动 Chrome（Debug 调试前手动启，不跟随 VSCode 退出）
+        //    使用独立的 user-data-dir 避免污染日常 Chrome profile
+        // =================================================================
+        {
+            "label": "Launch Chrome (CDP 9222)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-Command",
+                "$chrome='C:\\Program Files\\chrome-portable\\chrome-win64\\chrome.exe'; if (!(Test-Path $chrome)) { $chrome='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' }; $existing = Get-NetTCPConnection -LocalPort 9222 -ErrorAction SilentlyContinue; if ($existing) { Write-Host 'CDP 9222 already in use (pid=' + $existing.OwningProcess + ')' } else { Stop-Process chrome -ErrorAction SilentlyContinue; Start-Sleep 1; Start-Process -FilePath $chrome -ArgumentList @('--remote-debugging-port=9222','--no-first-run','--ignore-certificate-errors','--disable-gpu','--disable-software-rasterizer','--disable-background-timer-throttling','--disable-backgrounding-occluded-windows','--disable-renderer-backgrounding','--user-data-dir=C:\\temp\\chrome-rpa-profile','about:blank') -WindowStyle Normal; Start-Sleep 4; try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/version' -TimeoutSec 5; Write-Host ('CDP READY - Browser: ' + $r.Browser) } catch { Write-Host 'CDP FAILED - check Chrome exe path' } }"
+            ],
+            "problemMatcher": []
+        },
+
+        // =================================================================
+        // 6. Clean rebuild — 清空 build-mingw 重 configure
+        // =================================================================
+        {
+            "label": "Clean rebuild (Debug)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-Command",
+                "Remove-Item '${workspaceFolder}/build-mingw' -Recurse -Force -ErrorAction SilentlyContinue; Write-Host 'Cleaned'"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

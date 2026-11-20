@@ -1,0 +1,309 @@
+{
+    "version": "0.2.0",
+
+    // =====================================================================
+    // 多银行支持 — VSCode F5 配置
+    //
+    // 用法:
+    //   F5 或 Ctrl+Shift+D 打开 Run and Debug 面板, 下拉选配置
+    //
+    // 前置条件（首次做一次）:
+    //   1. CMakeCache.txt 确认 CMAKE_BUILD_TYPE=Debug
+    //   2. 不再需要手动启 Chrome：run 配置已去掉 --no-launch，
+    //      newrpa.exe 会按 config.json 自动启动有界面 Chrome（CDP 9222）。
+    //      只有 "Attach to..." 配置才需要 Chrome 已在运行。
+    //
+    // 断点可打在:
+    //   app/main.cpp                     — CLI 入口 / 银行选择 / action 分发
+    //   plugins/<银行>/<Plugin>.cpp       — Login / GetCurBal / DownBankSlip
+    //   core/src/cdp/CDPDomains.cpp      — NetworkDomain 下载拦截
+    //   core/src/cdp/CDPSession.cpp      — WebSocket 收发
+    //
+    // 新增银行后:
+    //   1. config.json 的 banks 数组里加一项
+    //   2. 下面 "选银行" 下拉 options 里加一个值 (字符串, 必须等于 bankName)
+    // =====================================================================
+
+    // --- 输入变量 (F5 前弹框让用户选) ---
+    "inputs": [
+        {
+            "id": "bankPick",
+            "type": "pickString",
+            "description": "选择要调试的银行",
+            "options": ["BCB", "ICBC"],
+            "default": "BCB"
+        },
+        {
+            "id": "actionPick",
+            "type": "pickString",
+            "description": "选择要执行的操作",
+            "options": [
+                "all-accounts",
+                "all",
+                "login",
+                "curbal",
+                "curtran",
+                "histran",
+                "slip"
+            ],
+            "default": "all-accounts"
+        },
+        {
+            "id": "beginDate",
+            "type": "promptString",
+            "description": "开始日期 (YYYY-MM-DD)",
+            "default": "2026-11-01"
+        },
+        {
+            "id": "endDate",
+            "type": "promptString",
+            "description": "结束日期 (YYYY-MM-DD)",
+            "default": "2026-11-20"
+        }
+    ],
+
+    // --- 调试配置列表 ---
+    "configurations": [
+
+        // ================================================================
+        // ★ 主配置：通用 — 选银行 + 选 action（不带日期）
+        //   适用于 login / curbal / curtran
+        // ================================================================
+        {
+            "name": "★ 通用 (选银行+action)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--bank", "${input:bankPick}",
+                "--action", "${input:actionPick}",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复，std::string 直接显示值)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        // ================================================================
+        // 通用 + 日期查询 — 选银行 + action + 开始/结束日期
+        //   适用于 histran / slip
+        // ================================================================
+        {
+            "name": "通用+日期 (histran/slip)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--bank", "${input:bankPick}",
+                "--action", "${input:actionPick}",
+                "--begin", "${input:beginDate}",
+                "--end", "${input:endDate}",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复，std::string 直接显示值)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        // ================================================================
+        // --- 快捷配置: 北京银行 (BCB) ---
+        // ================================================================
+        {
+            "name": "★ BCB 全账号下载 (自动启 Chrome)",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BCB", "--action", "all-accounts", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "BCB 登录",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BCB", "--action", "login", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "BCB 当日余额",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BCB", "--action", "curbal", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "BCB 历史交易",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BCB", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "BCB 电子回单",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BCB", "--action", "slip", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        // ================================================================
+        // --- 快捷配置: 工商银行 (ICBC) ---
+        // ================================================================
+        {
+            "name": "ICBC 登录",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "ICBC", "--action", "login", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "ICBC 历史交易",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "ICBC", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        // ================================================================
+        // --- 运维工具 ---
+        // ================================================================
+
+        // 列出所有加载的插件 (不用 Chrome)
+        {
+            "name": "列出已加载插件 (newrpa list)",
+            "type": "cppdbg", "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [ "list", "--config", "${workspaceFolder}/build-mingw/bin/config.json" ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "Enable pretty print (gdb Python 已修复)", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        // 启动 Chrome (独立进程, 稳定化参数)
+        {
+            "name": "启动 Chrome (CDP 9222)",
+            "type": "cppdbg", "request": "launch",
+            "program": "C:/Program Files/chrome-portable/chrome-win64/chrome.exe",
+            "args": [
+                "--remote-debugging-port=9222", "--no-first-run",
+                "--ignore-certificate-errors", "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--user-data-dir=C:/temp/chrome-rpa-profile",
+                "about:blank"
+            ],
+            "stopAtEntry": false, "externalConsole": false,
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe"
+        },
+
+        // Attach 到已经在跑的 newrpa.exe
+        {
+            "name": "Attach to newrpa.exe (gdb)",
+            "type": "cppdbg", "request": "attach",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "MIMode": "gdb", "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [ { "description": "Enable pretty print (gdb Python 已修复，std::string 直接显示值)", "text": "-enable-pretty-printing", "ignoreFailures": true } ]
+        }
+    ]
+}

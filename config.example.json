@@ -1,0 +1,83 @@
+{
+    "_comment": [
+        "NewRpa-Next 多银行配置文件",
+        "每个银行一个对象，banks 数组可无限扩展",
+        "bankName 必须与插件 DLL 导出的 GetId() 短名一致 (BCB→newrpa.bcb, ICBC→newrpa.icbc)",
+        "插件 DLL 放在 pluginDir 指定目录，命名 lib<name>.dll 或 lib<name>_plugin.dll",
+        "",
+        "已支持银行:",
+        "  BCB  — 北京银行 (libbcb.dll)     — 完整: login/curbal/curtran/histran/slip",
+        "  ICBC — 中国工商银行 (libicbc.dll) — 原型: login/curbal/curtran/histran",
+        "",
+        "新增银行步骤:",
+        "  1. 在 plugins/ 下新建子目录写插件 (实现 IBankPlugin 接口)",
+        "  2. CMakeLists.txt 里 add_subdirectory 并 target_link_libraries",
+        "  3. 重新 cmake + make，新 DLL 会出现在 build-mingw/bin/ 或 bin/plugins/",
+        "  4. 在这里的 banks 数组里加一个对象即可"
+    ],
+
+    "chromePath": "C:/Program Files/chrome-portable/chrome-win64/chrome.exe",
+    "chromePort": 9222,
+    "headless": false,
+
+    "_chromeArgs_note": "对应 Selenium add_argument，启动 Chrome 时默认追加（含空格的值会自动加引号）",
+    "chromeArgs": [
+        "--enable-automation",
+        "--no-sandbox",
+        "--start-maximized",
+        "--ignore-certificate-errors",
+        "--ignore-ssl-errors",
+        "--enable-extensions",
+        "--safebrowsing-disable-download-protection",
+        "--lang=zh-CN",
+        "--disable-blink-features=AutomationControlled",
+        "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (Khtml, like Gecko) Chrome/86.0.4240.198 Safari/537.36"
+    ],
+
+    "_chromePrefs_note": "对应 add_experimental_option('prefs')，点号路径启动时写入 Default/Preferences；重复键已按后者覆盖前者去重",
+    "chromePrefs": {
+        "download.prompt_for_download": true,
+        "directory_upgraded": true,
+        "credentials_enable_service": true,
+        "profile.password_manager_enabled": true,
+        "pdfjs.disabled": true,
+        "profile.default_content_setting_values.notifications": 2,
+        "download.folderList": 2,
+        "profile.default_content_setting_values.automatic_downloads": true,
+        "security.cookie_behavior": false
+    },
+
+    "_excludeSwitches_note": "对应 excludeSwitches，CDP 直启无 ChromeDriver 等价物，仅记录；--enable-automation 由 chromeArgs 控制",
+    "chromeExcludeSwitches": [
+        "ignore-certificate-errors",
+        "enable-automation"
+    ],
+
+    "pluginDir": "./plugins",
+    "logLevel": "info",
+
+    "banks": [
+        {
+            "bankName": "BCB",
+            "displayName": "北京银行企业银行演示版",
+            "loginUrl": "https://cbank.bankofbeijing.com.cn:9081/login?redirect=%2F",
+            "company": "测试企业",
+            "certPassword": "111111",
+            "password": "111111",
+            "operatorId": "提交人",
+            "account": "演示账号001",
+            "note": "企业网银标准版演示版"
+        },
+        {
+            "bankName": "ICBC",
+            "displayName": "中国工商银行",
+            "loginUrl": "https://icbc.com.cn/icbc/",
+            "company": "",
+            "certPassword": "",
+            "password": "",
+            "operatorId": "",
+            "account": "",
+            "note": "企业网银 (演示账号待填)"
+        }
+    ]
+}

@@ -1,0 +1,52 @@
+{
+    // ============================================================
+    // NewRpa-Next — VSCode 工作区设置
+    // MinGW g++ + CMake Tools + gdb 调试
+    // ============================================================
+
+    // --- CMake Tools ---
+    "cmake.buildDirectory": "${workspaceFolder}/build-mingw",
+    "cmake.configureOnOpen": false,
+    "cmake.generator": "MinGW Makefiles",
+    "cmake.configureSettings": {
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_MAKE_PROGRAM": "mingw32-make"
+    },
+    "cmake.environment": {
+        "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin"
+    },
+
+    // --- C/C++ (ms-vscode.cpptools) ---
+    "C_Cpp.default.compilerPath": "E:/Workdaddy/mingw64/bin/g++.exe",
+    "C_Cpp.default.intelliSenseMode": "windows-gcc-x64",
+    "C_Cpp.default.cStandard": "c17",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/core/include",
+        "${workspaceFolder}/third_party/nlohmann_json/include",
+        "${workspaceFolder}/third_party/cpp_httplib",
+        "${workspaceFolder}/third_party/spdlog/include"
+    ],
+    "C_Cpp.default.defines": [
+        "_WIN32",
+        "NOMINMAX"
+    ],
+
+    // --- 格式化 ---
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.clang_format_style": "file",
+
+    // --- 文件关联 ---
+    "files.associations": {
+        "*.hpp": "cpp"
+    },
+    "files.exclude": {
+        "**/build-mingw": true,
+        "**/.git": true
+    },
+
+    // --- 终端环境 ---
+    "terminal.integrated.env.windows": {
+        "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
+    }
+}
