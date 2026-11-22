@@ -14,6 +14,16 @@
 #include "newrpa/net/HttpDownloader.h"
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+
+// ---- 查询版登录用的硬件盒子 / GDI+ PNG 解码 ----
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <newrpa/singleUsbbox/HidMouse.hpp>
+#include "SkKeyBoard.h"
+#include <objidl.h>
+#include <gdiplus.h>
+
 #include <chrono>
 #include <thread>
 #include <fstream>
@@ -23,6 +33,9 @@
 #include <utility>
 #include <iomanip>
 #include <ctime>
+#include <cstdlib>
+#include <cmath>
+#include <random>
 
 using namespace newrpa;
 namespace fs = std::filesystem;
@@ -135,6 +148,18 @@ void BCBPlugin::Close() {
 std::string BCBPlugin::EvalStr(const std::string& js) {
     if (!rt_) return "";
     return rt_->EvalString(js);
+}
+
+std::string BCBPlugin::EvalStrQ(const std::string& js, int timeoutMs) {
+    if (!rt_) return "";
+    try {
+        return rt_->EvalString(js, timeoutMs);
+    } catch (const std::exception& e) {
+        spdlog::warn("[BCB] EvalStr 超时/失败（跳过本轮）: {}", e.what());
+        return "";
+    } catch (...) {
+        return "";
+    }
 }
 
 bool BCBPlugin::EvalBool(const std::string& js) {
@@ -571,8 +596,8 @@ std::string BCBPlugin::RunAllAccounts() {
     bool histranOK = true;
     GotoRoute("AM/AM2/TAM2A01");
     auto orgs = SelOptions(0);           // 机构
-    const int accIdxBase = 1;            // 账号 select 索引    
-    std::multimap<std::string ,std::string> fileAccountMap;  
+    const int accIdxBase = 1;            // 账号 select 索引
+    std::multimap<std::string ,std::string> fileAccountMap;
     for (size_t oi = 0; oi < orgs.size(); ++oi) {
         SetSelByValue(0, orgs[oi].second);
         std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -952,6 +977,12 @@ std::string BCBPlugin::Login() {
     std::string url = cfg_.loginUrl.empty()
         ? "https://cbank.bankofbeijing.com.cn:9081/login?redirect=%2F"
         : cfg_.loginUrl;
+
+    // 查询版与演示版是完全不同的流程（账号+密码+顶象滑块 vs 企业+证书+登录密码）
+    if (url.find("version=query") != std::string::npos) {
+        spdlog::info("[BCB] 查询版登录入口");
+        return LoginQuery();
+    }
 
     // 如果当前已经是目标页面，跳过 Navigate
     std::string curUrl = EvalStr("location.href");
@@ -1424,6 +1455,833 @@ std::string BCBPlugin::HttpDirect() {
     summary << "完成: " << success << "/" << tasks.size() << " 成功\n";
     summary << "说明: 演示版数据为静态资源，免登录可读；登录步骤用 CDP 完成以验证会话。\n";
     return summary.str();
+}
+
+} // namespace bcb
+} // namespace newrpa
+
+// ============================================================================
+//          查 询 版 专 用 流 程（Python boj_login_complete.py 已验证）
+//  与演示版完全不同：账号+密码+顶象滑块；密码走 pgeCtrl 安全控件（硬件键盘）；
+//  滑块 = 顶象 dx_captcha（canvas 400x200，显示宽度可变 KX），盒子 HID 鼠标拖动。
+// ============================================================================
+namespace newrpa {
+namespace bcb {
+namespace {
+
+struct GapCand { int x, y; double score; };
+
+// 找最大的可见 Chrome 窗口（与 KLB 同款）
+HWND FindBcbChromeWindow() {
+    struct Ctx { HWND best; int len; } ctx{nullptr, 0};
+    EnumWindows([](HWND h, LPARAM lp)->BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        if (!IsWindowVisible(h)) return TRUE;
+        wchar_t cls[256] = {0};
+        GetClassNameW(h, cls, 256);
+        if (wcsstr(cls, L"Chrome_WidgetWin_1") == nullptr) return TRUE;
+        RECT r{};
+        if (!GetWindowRect(h, &r)) return TRUE;
+        if (r.right - r.left < 600 || r.bottom - r.top < 400) return TRUE;
+        int n = GetWindowTextLengthW(h);
+        if (n > c->len) { c->len = n; c->best = h; }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.best;
+}
+
+bool FocusBcbChromeWindow() {
+    HWND h = FindBcbChromeWindow();
+    if (!h) return false;
+    if (GetForegroundWindow() == h) return true;
+    ShowWindow(h, SW_RESTORE);
+    keybd_event(VK_MENU, 0, 0, 0);
+    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+    DWORD fgTid = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    DWORD myTid = GetCurrentThreadId();
+    bool attached = false;
+    if (fgTid && fgTid != myTid) attached = (AttachThreadInput(myTid, fgTid, TRUE) != 0);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    if (attached) AttachThreadInput(myTid, fgTid, FALSE);
+    Sleep(200);
+    return GetForegroundWindow() == h;
+}
+
+// GDI+ 解码 PNG -> 灰度（零第三方依赖，系统自带）
+bool DecodePngGray(const std::vector<uint8_t>& png, int& W, int& H,
+                   std::vector<uint8_t>& gray) {
+    W = H = 0; gray.clear();
+    if (png.size() < 8) return false;
+    Gdiplus::GdiplusStartupInput si;
+    ULONG_PTR tok = 0;
+    if (Gdiplus::GdiplusStartup(&tok, &si, nullptr) != Gdiplus::Ok) return false;
+    bool ok = false;
+    do {
+        HGLOBAL hg = ::GlobalAlloc(GMEM_MOVEABLE, png.size());
+        if (!hg) break;
+        void* p = ::GlobalLock(hg);
+        if (!p) { ::GlobalFree(hg); break; }
+        memcpy(p, png.data(), png.size());
+        ::GlobalUnlock(hg);
+        IStream* st = nullptr;
+        if (CreateStreamOnHGlobal(hg, TRUE, &st) != S_OK) { ::GlobalFree(hg); break; }
+        Gdiplus::GpBitmap* bmp = nullptr;
+        UINT w = 0, h = 0;
+        if (Gdiplus::DllExports::GdipCreateBitmapFromStream(st, &bmp) == Gdiplus::Ok && bmp &&
+            Gdiplus::DllExports::GdipGetImageWidth(bmp, &w) == Gdiplus::Ok &&
+            Gdiplus::DllExports::GdipGetImageHeight(bmp, &h) == Gdiplus::Ok && w > 50 && h > 50) {
+            Gdiplus::BitmapData bd{};
+            Gdiplus::Rect rect(0, 0, (INT)w, (INT)h);
+            if (Gdiplus::DllExports::GdipBitmapLockBits(bmp, &rect, Gdiplus::ImageLockModeRead,
+                                   PixelFormat32bppARGB, &bd) == Gdiplus::Ok && bd.Scan0) {
+                gray.resize((size_t)w * h);
+                const uint8_t* base = (const uint8_t*)bd.Scan0;
+                INT stride = bd.Stride;
+                for (UINT y = 0; y < h; ++y) {
+                    const uint8_t* row = base + (size_t)y * stride;
+                    for (UINT x = 0; x < w; ++x) {
+                        const uint8_t* px = row + (size_t)x * 4;   // B G R A
+                        gray[(size_t)y * w + x] =
+                            (uint8_t)((px[0] * 29 + px[1] * 150 + px[2] * 77) >> 8);
+                    }
+                }
+                Gdiplus::DllExports::GdipBitmapUnlockBits(bmp, &bd);
+                W = (int)w; H = (int)h; ok = true;
+            }
+            Gdiplus::DllExports::GdipDisposeImage(bmp);
+        }
+        st->Release();
+    } while (false);
+    Gdiplus::GdiplusShutdown(tok);
+    return ok;
+}
+
+// 缺口候选：内环暗 vs 外环亮差值（Python candidates() 同款）
+std::vector<GapCand> GapCandidates(const std::vector<uint8_t>& gray, int W, int H) {
+    const int R = 26;
+    const int y_lo = 55, y_hi = std::min(H - 45, 150);
+    const int x_lo = 80, x_hi = W - 90;
+    const int step = 4;
+    std::vector<GapCand> best;
+    if (y_hi <= y_lo || x_hi <= x_lo) return best;
+    auto g = [&](int x, int y)->int {
+        if (x < 0 || y < 0 || x >= W || y >= H) return 128;
+        return gray[(size_t)y * W + x];
+    };
+    for (int cy = y_lo; cy < y_hi; cy += step) {
+        for (int cx = x_lo; cx < x_hi; cx += step) {
+            double isum = 0; int icnt = 0;
+            for (int y = cy - R + 5; y <= cy + R - 4; y += 4)
+                for (int x = cx - R + 5; x <= cx + R - 4; x += 4)
+                    { isum += g(x, y); ++icnt; }
+            double rsum = 0; int rcnt = 0;
+            for (int y = cy - R - 3; y <= cy + R + 3; y += 4)
+                for (int x = cx - R - 3; x <= cx + R + 3; x += 4) {
+                    if (std::abs(x - cx) > R - 2 || std::abs(y - cy) > R - 2)
+                        { rsum += g(x, y); ++rcnt; }
+                }
+            if (!icnt || !rcnt) continue;
+            best.push_back({cx, cy, rsum / rcnt - isum / icnt});
+        }
+    }
+    std::sort(best.begin(), best.end(),
+              [](const GapCand& a, const GapCand& b) { return a.score > b.score; });
+    std::vector<GapCand> picks;
+    for (auto& b : best) {
+        bool dup = false;
+        for (auto& q : picks) if (std::abs(b.x - q.x) <= 38) { dup = true; break; }
+        if (!dup) picks.push_back(b);
+        if (picks.size() >= 6) break;
+    }
+    std::vector<GapCand> out;
+    for (auto& p : picks)
+        if (p.x >= x_lo && p.x <= x_hi) out.push_back(p);
+    std::sort(out.begin(), out.end(),
+              [](const GapCand& a, const GapCand& b) { return a.x < b.x; });
+    if (out.size() > 4) out.resize(4);
+    return out;
+}
+
+} // namespace
+
+// ----------------------------------------------------------------------------
+// 盒子键盘拟人输入（IME 隔离 + 字间随机停顿 + 长顿）
+// ----------------------------------------------------------------------------
+bool BCBPlugin::HardwareType(const std::string& text, int delayMs) {
+    int wl = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    std::wstring w(wl > 1 ? wl - 1 : 0, L'\0');
+    if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &w[0], wl);
+
+    HWND h = FindBcbChromeWindow();
+    if (!h) { spdlog::error("[BCB] 没找到 Chrome 窗口"); return false; }
+    if (GetForegroundWindow() != h) {
+        ShowWindow(h, SW_RESTORE);
+        keybd_event(VK_MENU, 0, 0, 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+        DWORD fgTid = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+        DWORD myTid = GetCurrentThreadId();
+        bool attached = false;
+        if (fgTid && fgTid != myTid) attached = (AttachThreadInput(myTid, fgTid, TRUE) != 0);
+        BringWindowToTop(h);
+        SetForegroundWindow(h);
+        if (attached) AttachThreadInput(myTid, fgTid, FALSE);
+        Sleep(200);
+    }
+
+    SkKeyBoard kb;
+    kb.setImeIsolation(true);
+    kb.setKeyDelay(delayMs);
+    auto st = SkKeyBoard::detect();
+    spdlog::info("[BCB] HW keyboard: usable={} detail={}", st.usable, st.detail);
+    if (!kb.open()) {
+        spdlog::error("[BCB] SkKeyBoard open failed: {}", kb.lastError());
+        return false;
+    }
+    // 拟人：字间随机停顿，每 2~4 字一次"想一想"长顿
+    // 注意：不能加 static —— lambda 捕获非自动存储期变量是未定义行为（C++20 起报错）
+    std::mt19937 rng{
+        static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count())};
+    auto rnd = [&rng](int lo, int hi) {
+        return lo + (int)(rng() % (unsigned)(hi - lo + 1));
+    };
+    int sinceLong = 0, nextLong = rnd(2, 4);
+    for (size_t i = 0; i < w.size(); ++i) {
+        if (!kb.type(std::wstring(1, w[i]), delayMs)) {
+            spdlog::error("[BCB] HW type failed: {}", kb.lastError());
+            return false;
+        }
+        Sleep(rnd(40, 160));
+        if (++sinceLong >= nextLong && i + 1 < w.size()) {
+            Sleep(rnd(200, 600));
+            sinceLong = 0; nextLong = rnd(2, 4);
+        }
+    }
+    spdlog::info("[BCB] HW type ok, chars={}", w.size());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// origin / 增益标定
+// ----------------------------------------------------------------------------
+bool BCBPlugin::CalibrateBoxOrigin(HidMouse& m) {
+    EvalStr("window.__mp=[];document.addEventListener('mousemove',"
+            "function(e){window.__mp=[e.clientX,e.clientY,e.buttons]},true)");
+    double sx = 0, sy = 0; int cnt = 0;
+    const double probes[][2] = {{900, 600}, {1100, 700}};
+    for (auto& p : probes) {
+        m.moveTo((int)p[0], (int)p[1]);
+        Sleep(300);
+        std::string s = EvalStr("JSON.stringify(window.__mp||[])");
+        try {
+            auto j = nlohmann::json::parse(s);
+            if (j.is_array() && j.size() >= 2) {
+                double cx = j[0].get<double>(), cy = j[1].get<double>();
+                if (cx != 0 || cy != 0) {
+                    sx += p[0] - cx * m.scale();
+                    sy += p[1] - cy * m.scale();
+                    ++cnt;
+                }
+            }
+        } catch (...) {}
+    }
+    if (!cnt) { spdlog::error("[BCB] origin 标定失败"); return false; }
+    m.setOrigin(sx / cnt, sy / cnt);
+    spdlog::info("[BCB] box origin=({:.1f},{:.1f})", m.originX(), m.originY());
+    return true;
+}
+
+double BCBPlugin::CalibrateGain(HidMouse& m) {
+    m.moveRel(5, 0); Sleep(150);          // 预热丢弃首步非线性
+    std::vector<double> gs;
+    for (int i = 0; i < 3; ++i) {
+        int x0, y0; HidMouse::currentPos(x0, y0); Sleep(60);
+        m.moveRel(20, 0); Sleep(160);
+        int x1, y1; HidMouse::currentPos(x1, y1);
+        gs.push_back(std::abs(x1 - x0) / 20.0);
+    }
+    std::sort(gs.begin(), gs.end());
+    double g = (gs.size() == 3) ? gs[1] : (gs.empty() ? 2.47 : gs.back());
+    if (g <= 0.5) g = 2.47;
+    spdlog::info("[BCB] rel gain={:.3f}", g);
+    return g;
+}
+
+// ----------------------------------------------------------------------------
+// 最小 jerk + OU 手抖 + 8ms 时间轴回放（每 80ms 实测位置校正）
+// ----------------------------------------------------------------------------
+bool BCBPlugin::TrackRel(HidMouse& m, double dxCss, double dyCss, double T,
+                         double gain, const char* label) {
+    const double dt = 0.008;
+    const int N = std::max(10, (int)(T / dt));
+    const double scale = m.scale();
+    int maxn = std::max(6, std::min(45,
+        (int)(std::abs(dxCss) * scale / T / dt / gain) + 2));
+    int maxmy = std::max(2, std::min(30,
+        (int)(std::abs(dyCss) * scale / T / dt / gain) + 2));
+    int x0, y0; HidMouse::currentPos(x0, y0);
+    const double tx = x0 + dxCss * scale, ty = y0 + dyCss * scale;
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    double nx = 0, ny = 0, doneX = 0, doneY = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 1; i <= N; ++i) {
+        double tau = (double)i / N;
+        double s = tau * tau * tau * (10 - 15 * tau + 6 * tau * tau);
+        nx += -12 * nx * dt + 1.45 * std::sqrt(dt) * gauss(rng);
+        ny += -12 * ny * dt + 2.10 * std::sqrt(dt) * gauss(rng);
+        double wantX = x0 + (dxCss * s + nx) * scale;
+        double wantY = y0 + (dyCss * s + ny) * scale;
+        int n = (int)std::lround((wantX - (x0 + doneX)) / gain);
+        int my = (int)std::lround((wantY - (y0 + doneY)) / gain);
+        n = std::max(-maxn, std::min(maxn, n));
+        my = std::max(-maxmy, std::min(maxmy, my));
+        if (n || my) {
+            m.moveRel(n, my);
+            m.drain();   // 邮箱必须读走，否则固件重复应用上一帧
+            doneX += n * gain; doneY += my * gain;
+        }
+        if (i % 10 == 0) {
+            int px, py; HidMouse::currentPos(px, py);
+            doneX = px - x0; doneY = py - y0;
+        }
+        while (std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - t0).count() < i * dt) {
+            Sleep(0);
+        }
+    }
+    int px, py; HidMouse::currentPos(px, py);
+    double ex = (tx - px) / scale, ey = (ty - py) / scale;
+    spdlog::info("[BCB] track[{}] D=({:.1f},{:.1f})css T={:.2f}s residual=({:.1f},{:.1f})",
+                 label, dxCss, dyCss, T, ex, ey);
+    return std::abs(ex) < 12 && std::abs(ey) < 12;
+}
+
+// ----------------------------------------------------------------------------
+// 顶象滑块一轮自动尝试。返回空串 = 通过；否则失败原因
+// ----------------------------------------------------------------------------
+std::string BCBPlugin::SliderAttempt(HidMouse& m) {
+    auto readSubMl = [&] {
+        return EvalNum(
+            "(function(){var s=document.querySelector('.dx_captcha_basic_sub-slider');"
+            "return s?(parseFloat(getComputedStyle(s).marginLeft)||0):-1})()");
+    };
+    auto readSliderMl = [&] {
+        return EvalNum(
+            "(function(){var s=document.querySelector('.dx_captcha_basic_slider');"
+            "return s?(parseFloat(getComputedStyle(s).marginLeft)||0):-1})()");
+    };
+
+    // 1 定位滑块按钮
+    std::string s = EvalStr(
+        "(function(){var r=document.querySelector('.dx_captcha_basic_slider');"
+        "if(!r)return '{}';var b=r.getBoundingClientRect();"
+        "return JSON.stringify({x:b.x,y:b.y,w:b.width,h:b.height});})()");
+    if (s.empty() || s == "{}") return "slider-not-found";
+    double sx = 0, sy = 0;
+    try {
+        auto j = nlohmann::json::parse(s);
+        sx = j["x"].get<double>() + j["w"].get<double>() / 2;
+        sy = j["y"].get<double>() + j["h"].get<double>() / 2;
+    } catch (...) { return "slider-parse-failed"; }
+
+    if (!CalibrateBoxOrigin(m)) return "origin-failed";
+    double gain = CalibrateGain(m);
+
+    // 2 自然移入（运动学轨迹），再闭环精调、按下
+    int cx0, cy0; HidMouse::currentPos(cx0, cy0);
+    double curX = (cx0 - m.originX()) / m.scale();
+    double curY = (cy0 - m.originY()) / m.scale();
+    double dx = sx - curX, dy = sy - curY;
+    double Din = std::sqrt(dx * dx + dy * dy);
+    TrackRel(m, dx, dy, std::max(0.35, std::min(0.75, 0.22 + 0.004 * Din)), gain, "approach");
+    m.releaseAll(); Sleep(150);
+    m.moveTo((int)m.cssToPhysX(sx), (int)m.cssToPhysY(sy)); Sleep(300);
+    m.leftDown(); Sleep(200);
+
+    // 3 起手 55px（触发 canvas 显示）
+    TrackRel(m, 55.0, 0.0, 0.46, gain, "takeoff");
+    Sleep(50);
+
+    // 4 读几何（触发前父容器 display:none，rect 全 0，必须在起手后读）
+    std::string geo = EvalStr(
+        "(function(){"
+        "var bg=document.querySelector('.dx_captcha_basic_bg');"
+        "var cv=document.querySelector('.dx_captcha_basic_bg canvas');"
+        "var sub=document.querySelector('.dx_captcha_basic_sub-slider');"
+        "if(!bg||!cv||!sub)return '{}';"
+        "var cr=cv.getBoundingClientRect(),sr=sub.getBoundingClientRect();"
+        "return JSON.stringify({cvW:cv.width,cvH:cv.height,"
+        "cvCssW:cr.width,cvCssH:cr.height,"
+        "subLeft:parseFloat(getComputedStyle(sub).left)||0,"
+        "subW:sr.width,"
+        "subMl:parseFloat(getComputedStyle(sub).marginLeft)||0});})()");
+    double cvW = 0, cvCssW = 0, subLeft = 0, subW = 0, subMl0 = 0;
+    try {
+        auto j = nlohmann::json::parse(geo);
+        cvW = j["cvW"].get<double>();      cvCssW = j["cvCssW"].get<double>();
+        subLeft = j["subLeft"].get<double>(); subW = j["subW"].get<double>();
+        subMl0 = j["subMl"].get<double>();
+    } catch (...) { m.leftUp(); return "geo-failed"; }
+    if (cvW < 100 || cvCssW < 50) { m.leftUp(); return "puzzle-not-shown"; }
+    double KX = cvCssW / cvW;
+    double startCenter = subLeft + subW / 2;
+    spdlog::info("[BCB] KX={:.4f} start_center={:.1f} subMl0={:.1f}", KX, startCenter, subMl0);
+
+    // 5 抓 canvas -> 缺口候选
+    std::string dataUrl = EvalStr(
+        "(function(){var c=document.querySelector('.dx_captcha_basic_bg canvas');"
+        "return (c && c.width>100) ? c.toDataURL('image/png') : '';})()");
+    const std::string kPrefix = "data:image/png;base64,";
+    if (dataUrl.size() <= kPrefix.size()) { m.leftUp(); return "canvas-capture-failed"; }
+    auto png = util::Base64Decode(dataUrl.substr(kPrefix.size()));
+    int W = 0, H = 0; std::vector<uint8_t> gray;
+    if (!DecodePngGray(png, W, H, gray)) { m.leftUp(); return "png-decode-failed"; }
+    auto cands = GapCandidates(gray, W, H);
+    if (cands.empty()) { m.leftUp(); return "no-gap-candidate"; }
+    GapCand best = cands[0];
+    for (auto& c : cands) if (c.score > best.score) best = c;
+    spdlog::info("[BCB] gap=({},{}) score={:.1f} cands={}", best.x, best.y, best.score, cands.size());
+
+    // 6 speed 标定（顶象随机 speed：subMl = speed x sliderMl）
+    double slMl = readSliderMl();
+    double speed = 1.0;
+    if (slMl > 6 && subMl0 > 2) speed = subMl0 / slMl;
+    spdlog::info("[BCB] speed_est={:.3f}", speed);
+
+    double targetSub = std::max(0.0, best.x * KX - startCenter);
+    double targetCss = targetSub / speed + 35.0 - 30.0;
+    spdlog::info("[BCB] target_sub={:.1f} target_css={:.1f}", targetSub, targetCss);
+
+    // 7 主拖（按住期间不查询，中途不留死尸段）
+    int cx1, cy1; HidMouse::currentPos(cx1, cy1);
+    double curCss = (cx1 - m.originX()) / m.scale() - sx;
+    double Dm = std::abs(targetCss - curCss);
+    double Tm = std::max(0.32, std::min(1.15, 0.30 + 0.004 * Dm));
+    TrackRel(m, targetCss - curCss, 0.0, Tm, gain, "main");
+    Sleep(80);
+
+    // 8 trim（补偿 speed 估计误差）
+    double err = targetSub - readSubMl();
+    if (std::abs(err) > 2.5) {
+        spdlog::info("[BCB] trim err={:.1f}", err);
+        TrackRel(m, err / speed, 0.0, 0.18, gain, "trim");
+        Sleep(80);
+    }
+    spdlog::info("[BCB] final subMl={:.1f} target={:.1f} err={:.1f}",
+                 readSubMl(), targetSub, targetSub - readSubMl());
+    // 到位后按住停顿 2s 再松手（真人拖到位会稍作停顿，直接秒松易被判机器）
+    spdlog::info("[BCB] 到位停顿 2000ms 后释放");
+    Sleep(2000);
+    m.leftUp(); Sleep(2500);
+
+    // 9 判定：弹窗 = 失败；拼图收起且无弹窗 = 通过
+    if (!PopupText().empty()) return "popup: " + PopupText();
+    std::string st = EvalStr(
+        "(function(){var c=document.querySelector('.dx_captcha_basic_content');"
+        "var cap=document.getElementById('captcha');"
+        "return JSON.stringify({disp:c?getComputedStyle(c).display:'gone',"
+        "txt:(document.body.innerText||'').indexOf('验证成功')>=0,"
+        "cap:cap?cap.className:''});})()");
+    try {
+        auto j = nlohmann::json::parse(st);
+        std::string disp = j.value("disp", "gone");
+        bool txt = j.value("txt", false);
+        std::string cap = j.value("cap", "");
+        if (disp == "none" || txt || cap.find("success") != std::string::npos) return "";
+    } catch (...) {}
+    return "puzzle-still-open";
+}
+
+// ----------------------------------------------------------------------------
+// 人工等待秒数：默认 300s（5 分钟）
+//   可用环境变量 BCB_MANUAL_WAIT_S 覆盖（>=30 才生效），例如在 launch.json
+//   的 environment 里加 { "name": "BCB_MANUAL_WAIT_S", "value": "600" }
+// ----------------------------------------------------------------------------
+static int ManualWaitSeconds() {
+    const char* env = std::getenv("BCB_MANUAL_WAIT_S");
+    if (env && *env) {
+        int v = std::atoi(env);
+        if (v >= 30) return v;
+    }
+    return 15000;
+}
+
+// ----------------------------------------------------------------------------
+// 鸣笛呼唤人工：不碰 HID，等真人拖滑块（最长 ManualWaitSeconds()），成功后自动点登录
+// ----------------------------------------------------------------------------
+std::string BCBPlugin::ManualTakeover() {
+    const int waitS = ManualWaitSeconds();
+    spdlog::warn("[BCB] >>>>> 需要人工处理：请在浏览器里手动把滑块拖到缺口（拖完不用点登录），最长等 {} 秒 <<<<<", waitS);
+    for (int i = 0; i < 6; ++i) { Beep(i % 2 == 0 ? 980 : 620, 300); Sleep(50); }
+    const std::string kStateJs =
+        "(function(){"
+        "var c=document.querySelector('.dx_captcha_basic_content');"
+        "var cap=document.getElementById('captcha');"
+        "var stb=document.querySelector('.dx_captcha_basic_state-box');"
+        "var pop=[];document.querySelectorAll('.el-message-box,.el-dialog').forEach("
+        "function(e){if(e.getBoundingClientRect().width>0)pop.push((e.innerText||'').trim().slice(0,60))});"
+        "return JSON.stringify({disp:c?getComputedStyle(c).display:'none',"
+        "capCls:cap?cap.className:'',stDisp:stb?getComputedStyle(stb).display:'none',"
+        "txt:(document.body.innerText||'').indexOf('验证成功')>=0,"
+        "url:location.href,pop:pop});})()";
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto elapsed = [&t0]() {
+        return std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
+
+    int stage = 0;          // 0=还没看到按下  1=已按下拖动中
+    int submits = 0;        // 已点「登录」次数
+    int captchaLoops = 0;   // 弹窗已确认次数（含验证码类/凭证类）
+    bool needRefill = false;// 点掉弹窗后密码框常被清空，再次提交前要重填
+    bool submitted = false; // 本轮是否已点过「登录」
+    double submitAt = 0.0;
+    // 登录失败允许次数：提交 3 次都失败才叫人
+    const int kMaxSubmits = 3;
+
+    while (elapsed() < static_cast<double>(waitS)) {
+        std::string s = EvalStrQ(kStateJs, 12000);
+        if (s.empty()) { Sleep(400); continue; }
+        nlohmann::json j;
+        try { j = nlohmann::json::parse(s); } catch (...) { Sleep(400); continue; }
+
+        // 1) 提示弹窗：先点掉「确定」，再判断还能不能再试
+        //    规则：登录最多提交 3 次，3 次都失败才叫人。
+        //    点确定后密码框会被清空，所以继续之前必须重填账号密码。
+        if (j.contains("pop") && !j["pop"].empty()) {
+            std::string popText;
+            try {
+                for (const auto& e : j["pop"]) popText += e.get<std::string>() + " | ";
+            } catch (...) { popText = j["pop"].dump(); }
+
+            bool credIssue = popText.find("密码") != std::string::npos ||
+                             popText.find("账号") != std::string::npos ||
+                             popText.find("标识号") != std::string::npos ||
+                             popText.find("锁定") != std::string::npos ||
+                             popText.find("冻结") != std::string::npos;
+
+            ClickPopupOk();     // 先把框点掉，别挡住页面
+            Sleep(800);
+            ++captchaLoops;
+
+            if (submits >= kMaxSubmits || captchaLoops > 6) {
+                for (int i = 0; i < 10; ++i) { Beep(1500, 260); Sleep(80); }
+                spdlog::error("[BCB] >>>>> 登录已失败 {} 次（最后一次提示「{}」）：需要人工介入！"
+                              "自动流程已停止 <<<<<", submits, popText);
+                return "need-manual: " + popText;
+            }
+
+            // 点确定后密码框已被清空、滑块状态也乱了 —— 原地重填会拿旧状态误判，
+            // 直接重新加载页面最干净，再重填账号密码等人工拖。
+            spdlog::warn("[BCB] 第 {} 次登录失败：{}{}（已点确定，重新加载并重填，还剩 {} 次机会）",
+                         submits, popText, credIssue ? " [凭证类]" : " [验证码类]",
+                         kMaxSubmits - submits);
+            try { session_->Call("Page.reload", {{"ignoreCache", true}}, 10000); } catch (...) {}
+            Sleep(6000);
+            DismissCertPopup();   // reload 后证书提示可能再弹
+            bool refilled = false;
+            if (WaitForElement("input[placeholder*=\"账号\"]", 12000)) {
+                refilled = FillQueryAccountPwd();
+                if (!refilled) { Sleep(1500); refilled = FillQueryAccountPwd(); }
+            }
+            if (!refilled) {
+                for (int i = 0; i < 10; ++i) { Beep(1500, 260); Sleep(80); }
+                spdlog::error("[BCB] >>>>> 重载后重填账号密码失败：需要人工介入 <<<<<");
+                return "need-manual: refill-failed";
+            }
+            stage = 0;           // 滑块已复位，等人工再拖
+            submitted = false;
+            Beep(880, 200);
+            continue;
+        }
+
+        // 2) 离开登录页 = 成功
+        std::string url = j.value("url", "");
+        if (url.find("/login") == std::string::npos) {
+            Beep(1200, 160); Beep(1200, 160);
+            return "";
+        }
+
+        // 3) 滑块是否通过
+        bool txt = j.value("txt", false);
+        std::string cap = j.value("capCls", "");
+        std::string disp = j.value("disp", "");
+        bool sliderOk = txt || cap.find("success") != std::string::npos;
+        if (!sliderOk && stage == 0 && disp == "block") {
+            stage = 1; spdlog::info("[BCB] 检测到已按下滑块，继续拖...");
+        } else if (!sliderOk && stage == 1 && disp == "none") {
+            sliderOk = true;   // 拖完松手、拼图收起
+        }
+        if (sliderOk && !submitted) {
+            if (submits >= kMaxSubmits) {
+                for (int i = 0; i < 10; ++i) { Beep(1500, 260); Sleep(80); }
+                spdlog::error("[BCB] >>>>> 已提交 {} 次仍未进入：需要人工介入 <<<<<", submits);
+                return "need-manual: submit-limit";
+            }
+            if (needRefill) {
+                spdlog::info("[BCB] 点确定后密码框可能为空，重新填账号密码再提交...");
+                if (!FillQueryAccountPwd()) {
+                    for (int i = 0; i < 8; ++i) { Beep(1300, 240); Sleep(80); }
+                    spdlog::error("[BCB] >>>>> 重填账号密码失败，需要人工介入 <<<<<");
+                    return "need-manual: refill-failed";
+                }
+                needRefill = false;
+                Sleep(500);
+            }
+            // 提交前再核一次密码位数，防止空密码白提交一次
+            std::string plen = EvalStrQ(
+                "(function(){try{return ''+pgeCtrl.pwdLength()}catch(e){return 'E'}})()");
+            if (plen != "6") {
+                spdlog::warn("[BCB] 提交前密码位数={}，重填一次", plen);
+                if (!FillQueryAccountPwd()) {
+                    spdlog::error("[BCB] >>>>> 提交前重填密码失败：需要人工介入 <<<<<");
+                    return "need-manual: refill-failed";
+                }
+            }
+            Beep(1200, 160); Beep(1200, 160);
+            // 松手后等 1.5~2.7s 再点登录：真人拖完会看一眼再点，
+            // 太快提交时顶象常回「请使用图形验证码」（验证状态还没同步）
+            int settle = 1500 + static_cast<int>(GetTickCount64() % 1200);
+            spdlog::info("[BCB] 松手后停顿 {}ms 再提交", settle);
+            Sleep(settle);
+            spdlog::info("[BCB] 人工滑块通过，自动点登录（第 {} 次）...", submits + 1);
+            try { ClickButtonByText("登录"); } catch (...) { 
+                spdlog::warn("[BCB] 点登录超时，下一轮重试");
+                Sleep(800); continue;
+            }
+            submitted = true;
+            ++submits;
+            submitAt = elapsed();
+            Sleep(1500);
+            continue;
+        }
+        if (submitted && elapsed() - submitAt > 30.0) return "submit-no-redirect";
+        Sleep(600);
+    }
+    if (submitted) return "submit-no-redirect";
+    return "manual-timeout";
+}
+
+// ----------------------------------------------------------------------------
+// 查询版：填账号 + 盒子键盘输密码
+// ----------------------------------------------------------------------------
+bool BCBPlugin::FillQueryAccountPwd() {
+    // 硬件键盘是真实 HID 设备，按键事件发给系统「前台窗口」——
+    // Chrome 不在前台时字符会打到别人家（pwdLength=0）。每次填表前强制前置。
+    if (!FocusBcbChromeWindow()) {
+        spdlog::warn("[BCB] Chrome 窗口前置失败，硬件键盘可能落到其他窗口");
+    }
+    std::string acc = EvalStrQ(
+        "(function(){var e=document.querySelector('input[placeholder*=\"账号\"]');"
+        "if(!e)return 'no-input';"
+        "e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));"
+        "e.focus();return 'ok';})()");
+    if (acc != "ok") { spdlog::error("[BCB] 账号框没找到: {}", acc); return false; }
+    Sleep(300);
+    std::string accno = cfg_.account.empty() ? "20000037755514660017646" : cfg_.account;
+    try {
+        session_->Call("Input.insertText", {{"text", accno}}, 5000);
+    } catch (...) { return false; }
+    Sleep(500);
+    // 等密码控件就绪：点掉弹窗/重新加载后 #inputId2 可能还没渲染出来
+    if (!WaitForElement("#inputId2", 8000)) {
+        spdlog::error("[BCB] 密码框 #inputId2 未出现（被替换成控件占位？）");
+        return false;
+    }
+    std::string pwd = cfg_.password.empty() ? "123456" : cfg_.password;
+    // 焦点可能被弹窗/上次点击抢走，打不进就再点一次密码框重来
+    for (int tryNo = 1; tryNo <= 2; ++tryNo) {
+        EvalStrQ(
+            "(function(){var e=document.getElementById('inputId2');"
+            "if(!e)return 'no';e.click();e.focus();return 'ok';})()");
+        Sleep(900);
+        if (!HardwareType(pwd, 130)) return false;
+        Sleep(1000);
+        std::string plen = EvalStrQ(
+            "(function(){try{return ''+pgeCtrl.pwdLength()}catch(e){return 'E'}})()");
+        spdlog::info("[BCB] pwdLength={}（第 {} 次输入）", plen, tryNo);
+        if (plen == "6") return true;
+        // 位数不对（残留/漏键）：清空重打
+        EvalStrQ(
+            "(function(){try{if(pgeCtrl.clearAll)pgeCtrl.clearAll();}catch(e){}"
+            "var e=document.getElementById('inputId2');if(e){e.value='';}return '1';})()");
+        Sleep(600);
+    }
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// 页面可见弹窗文本
+// ----------------------------------------------------------------------------
+std::string BCBPlugin::PopupText() {
+    std::string s = EvalStrQ(
+        "(function(){var o=[];"
+        "document.querySelectorAll('.el-message-box,.el-dialog').forEach("
+        "function(e){if(e.getBoundingClientRect().width>0)"
+        "o.push((e.innerText||'').trim().slice(0,60))});"
+        "return JSON.stringify(o);})()");
+    if (s.empty() || s == "[]") return "";
+    return s;
+}
+
+// ----------------------------------------------------------------------------
+// 点掉 Element UI 提示弹窗的「确定」
+// 只认 .el-message-box / .el-dialog（顶象提示、业务提示都在这里）。
+// 证书弹窗 #xtxAlert 不在此列 —— 它的「确定」会下载 client_Setup.exe，
+// 仍由 DismissCertPopup() 直接移除 DOM，绝不点击。
+// ----------------------------------------------------------------------------
+bool BCBPlugin::ClickPopupOk() {
+    std::string r = EvalStrQ(
+        "(function(){"
+        "var bs=[].slice.call(document.querySelectorAll('.el-message-box,.el-dialog'))"
+        ".filter(function(e){return e.getBoundingClientRect().width>0;});"
+        "for(var i=0;i<bs.length;i++){var b=bs[i];"
+        "var btn=b.querySelector('.el-message-box__btns .el-button--primary,.el-dialog__footer .el-button--primary');"
+        "if(!btn){var all=b.querySelectorAll('button');"
+        "for(var k=0;k<all.length;k++){var t=(all[k].innerText||'').trim();"
+        "if(/^(确定|确认|知道了|好的|OK)$/i.test(t)){btn=all[k];break;}}}"
+        "if(btn){try{btn.click();}catch(e){return 'click-err';}"
+        "return 'ok:'+(b.innerText||'').trim().replace(/\\s+/g,' ').slice(0,40);}"
+        "}return 'none';})()");
+    if (r.rfind("ok:", 0) == 0) {
+        spdlog::info("[BCB] 已点弹窗「确定」: {}", r.substr(3));
+        return true;
+    }
+    if (!r.empty() && r != "none") spdlog::warn("[BCB] 点弹窗确定失败: {}", r);
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// 查询版登录主流程：3 次自动 -> 失败/降级即鸣笛呼唤人工 -> 人拖完自动提交
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 关掉「网银证书运行环境已升级」弹窗
+// 页面源码（app~745a3043）逻辑：
+//   window.sessionStorage.getItem("certDownload") || (document.body.appendChild(n) ...)
+// 即只要 certDownload 有值就不再弹；已弹出时 #xtxAlert 可整块 remove。
+// 弹窗点「确定」会跳转下载 client_Setup.exe —— 绝不能点，只移除。
+// ----------------------------------------------------------------------------
+int BCBPlugin::DismissCertPopup() {
+    std::string n = EvalStrQ(
+        "(function(){"
+        "try{if(!window.sessionStorage.getItem('certDownload'))"
+        "window.sessionStorage.setItem('certDownload','1');}catch(e){}"
+        "var c=0;"
+        "var a=document.getElementById('xtxAlert');"
+        "if(a&&a.parentNode){a.parentNode.removeChild(a);c++;}"
+        "return ''+c;})()");
+    int cnt = 0;
+    try { cnt = std::stoi(n); } catch (...) { cnt = 0; }
+    if (cnt > 0) spdlog::info("[BCB] 已移除证书环境提示弹窗 x{}", cnt);
+    return cnt;
+}
+
+std::string BCBPlugin::LoginQuery() {
+    if (!session_ || !browser_) return "error: session not ready";
+    if (loggedIn_) return "already logged in";
+
+    const std::string kQueryUrl =
+        "https://cbank.bankofbeijing.com.cn/login?redirect=%2F&version=query";
+    std::string url = cfg_.loginUrl.empty() ? kQueryUrl : cfg_.loginUrl;
+    if (url.find("version=query") == std::string::npos) url = kQueryUrl;
+
+    HidMouse m;
+    if (!m.open()) {
+        spdlog::error("[BCB] 盒子鼠标打不开: {}", m.lastError());
+        return "error: hid-mouse-open-failed";
+    }
+
+    // Chrome 156 的本地网络访问（LNA）权限：登录页会去连 wss://127.0.0.1:7802/27724/57658
+    // 探测安全控件服务；未授权时浏览器右上角弹「访问此设备上的其他应用和服务」。
+    // 这是 RPA 专用实例，直接预授权，避免每次都被弹窗打断。
+    try {
+        session_->Call("Browser.grantPermissions",
+                       {{"permissions", {"localNetworkAccess"}}}, 5000);
+        spdlog::info("[BCB] 已预授权 localNetworkAccess");
+    } catch (...) {
+        spdlog::warn("[BCB] 预授权 localNetworkAccess 失败（不影响后续流程）");
+    }
+
+    std::string curUrl = EvalStr("location.href");
+    if (curUrl.find("bankofbeijing.com.cn") == std::string::npos ||
+        curUrl.find("version=query") == std::string::npos) {
+        spdlog::info("[BCB] Navigating to {}", url);
+        page_->Navigate(url, 30000);
+        Sleep(5000);
+    }
+    DismissCertPopup();   // 导航后先清一次，免得遮罩挡住后面的鼠标操作
+    if (!WaitForElement("input[placeholder*=\"账号\"]", 10000)) {
+        spdlog::error("[BCB] 查询版登录表单没找到. URL={}", EvalStr("location.href"));
+        return "error: query login form not found";
+    }
+
+    std::string failReason;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        spdlog::info("[BCB] ===== 查询版登录自动尝试 {}/3 =====", attempt);
+        if (attempt > 1) {
+            try { session_->Call("Page.reload", {{"ignoreCache", true}}, 10000); }
+            catch (...) {}
+            Sleep(10000);
+        }
+        DismissCertPopup();   // reload 后可能再弹，每次尝试前都清
+        if (!FillQueryAccountPwd()) { failReason = "fill-failed"; continue; }
+
+        std::string sres = SliderAttempt(m);
+        if (!sres.empty()) {
+            failReason = sres;
+            spdlog::warn("[BCB] 滑块尝试 {} 失败: {}", attempt, sres);
+            // 顶象环境级降级（弹「请使用图形验证码」）：重试无意义，直接转人工
+            if (sres.find("图形验证码") != std::string::npos) break;
+            continue;
+        }
+        spdlog::info("[BCB] 滑块通过，提交登录...");
+        ClickButtonByText("登录");
+        Sleep(4000);
+        std::string pop = PopupText();
+        if (!pop.empty()) {
+            spdlog::warn("[BCB] 提交被拒: {}", pop);
+            if (pop.find("图形验证码") != std::string::npos) {
+                // 顶象环境级降级：位置再准也会被拒 —— 直接呼唤人工
+                failReason = "captcha-downgrade";
+                break;
+            }
+            failReason = "rejected: " + pop;
+            continue;
+        }
+        bool left = false;
+        for (int i = 0; i < 30; ++i) {
+            curUrl = EvalStr("location.href");
+            if (curUrl.find("/login") == std::string::npos) { left = true; break; }
+            Sleep(1000);
+        }
+        if (left) {
+            loggedIn_ = true;
+            spdlog::info("[BCB] 查询版登录成功: {}", EvalStr("location.href"));
+            return "ok";
+        }
+        failReason = "no-redirect";
+    }
+    spdlog::warn("[BCB] 自动登录未成({})，转入人工接管", failReason);
+    // 复位后重新填表，再呼唤人工
+    try { session_->Call("Page.reload", {{"ignoreCache", true}}, 10000); } catch (...) {}
+    Sleep(7000);
+    DismissCertPopup();   // 人工接管前也清一次，别让人看见弹窗
+    if (!WaitForElement("input[placeholder*=\"账号\"]", 10000))
+        return "error: refill-form-not-found";
+    if (!FillQueryAccountPwd()) return "error: refill-failed";
+    std::string man = ManualTakeover();
+    if (man.empty()) {
+        loggedIn_ = true;
+        return "ok";
+    }
+    if (man.rfind("need-manual", 0) == 0) {
+        // 凭证类/反复失败：明确要求人工介入，不再自动重试
+        for (int i = 0; i < 5; ++i) { Beep(1500, 500); Sleep(150); }
+        spdlog::error("[BCB] >>>>> 需要人工介入：{}（自动流程已停止） <<<<<", man);
+    }
+    return "error: " + man;
 }
 
 } // namespace bcb

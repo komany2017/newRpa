@@ -28,6 +28,7 @@
         "--ignore-certificate-errors",
         "--ignore-ssl-errors",
         "--enable-extensions",
+        "--enable-unsafe-extension-debugging",
         "--safebrowsing-disable-download-protection",
         "--lang=zh-CN",
         "--disable-blink-features=AutomationControlled",

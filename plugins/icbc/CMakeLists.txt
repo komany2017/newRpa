@@ -7,7 +7,9 @@ add_library(icbc_plugin SHARED
 set_target_properties(icbc_plugin PROPERTIES
     OUTPUT_NAME "icbc"
     SUFFIX ".dll"
+    # MinGW 下 DLL 算 RUNTIME 产物，两个都要设，否则落到 bin/ 而不是 bin/plugins/
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/plugins"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/plugins"
 )
 
 target_link_libraries(icbc_plugin

@@ -42,6 +42,11 @@ public:
 
         // 追加的 Chrome 命令行参数（来自配置 chromeArgs）
         std::vector<std::string> extraArgs;
+
+        // 要加载的解压版扩展目录（绝对路径，来自配置 extensionPaths）
+        // 启动器会拼 --load-extension / --disable-extensions-except，
+        // 并在 Chrome ≥137 时自动补 DisableLoadExtensionCommandLineSwitch 开关
+        std::vector<std::string> extensions;
         // Chrome Preferences 覆盖（点号路径 JSON，来自配置 chromePrefs）
         // 启动时合并写入 <userDataDir>/Default/Preferences
         std::string prefsJson;

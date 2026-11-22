@@ -14,6 +14,8 @@
 #include "newrpa/cdp/CDPDomains.h"
 #include "newrpa/chrome/ChromeBrowser.h"
 
+class HidMouse;   // core/include/newrpa/singleUsbbox/HidMouse.hpp（单头盒子硬件鼠标）
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -27,7 +29,7 @@ public:
     ~BCBPlugin() override;
 
     const char* GetId()           const override { return "newrpa.bcb"; }
-    const char* GetDisplayName()  const override { return "北京银行"; }
+    const char* GetDisplayName()  const override { return "北京银行演示版"; }
     uint32_t    Capabilities()     const override;
 
     void SetSession(std::shared_ptr<cdp::CDPSession> session,
@@ -136,6 +138,40 @@ private:
 
     // 混合模式：CDP 登录建会话后，用纯 HTTP 直连下载静态数据文件
     std::string HttpDirect() override;
+
+    // ---- 查询版专用流程（Python boj_login_complete.py / boj_box.py 已验证）----
+    // 注意：查询版与演示版完全不同——账号+密码+顶象滑块，无企业选择、无证书密码，
+    // 密码走 pgeCtrl 安全控件（必须硬件键盘输入），入口不带 :9081 端口。
+    // 登录成功标志：URL 离开 /login 进入 /queryHome。
+    std::string LoginQuery();
+    // 盒子键盘拟人输入（IME 隔离 + 字间随机停顿 + 长顿）
+    bool HardwareType(const std::string& text, int delayMs);
+    // CDP mousemove 反推 origin（css->物理），并 setOrigin 到鼠标对象
+    bool CalibrateBoxOrigin(HidMouse& m);
+    // rel 增益标定（预热丢弃首步非线性，取中位数）
+    double CalibrateGain(HidMouse& m);
+    // 最小 jerk + OU 噪声 + 8ms 时间轴回放（每 80ms 实测位置校正）
+    bool TrackRel(HidMouse& m, double dxCss, double dyCss, double T,
+                  double gain, const char* label);
+    // 顶象滑块一轮自动尝试（按下->起手->缺口->主拖->trim->松开->判定）
+    // 返回空串 = 通过；否则返回失败原因
+    std::string SliderAttempt(HidMouse& m);
+    // 鸣笛呼唤人工：不碰 HID，等真人拖滑块（最长 150s），成功后自动点登录
+    // 返回空串 = 登录成功；否则失败原因
+    std::string ManualTakeover();
+    // 查询版：填账号（CDP insertText）+ 盒子键盘输密码（pgeCtrl 校验 6 位）
+    bool FillQueryAccountPwd();
+    // 页面上可见的 .el-message-box/.el-dialog 文本（空串 = 无弹窗）
+    std::string PopupText();
+    // 点掉 Element UI 提示弹窗的「确定」按钮（返回 true = 已点）
+    // 只处理 .el-message-box/.el-dialog；证书弹窗 #xtxAlert 的「确定」会下载 exe，不在此处理
+    bool ClickPopupOk();
+    // 容错版 EvalStr：页面忙/加载中导致的 CDP 超时只返回空串，不抛异常中断整个 run
+    std::string EvalStrQ(const std::string& js, int timeoutMs = 10000);
+    // 关掉北京银行「网银证书运行环境已升级」弹窗（#xtxAlert）。
+    // 页面逻辑：sessionStorage.certDownload 为真即不再弹；已弹出则直接移除 DOM。
+    // 返回移除的弹窗个数（0 = 本来就没弹）。
+    int DismissCertPopup();
 
 private:
     plugin::BankConfig                    cfg_;

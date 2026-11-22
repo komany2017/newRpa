@@ -105,6 +105,66 @@
             "symbolLoadInfo": { "loadAll": true, "exception": "" },
             "internalConsoleOptions": "openOnSessionStart"
         },
+
+        // ================================================================
+        // ★★ 北京银行查询版 (login — 账号 + 密码 + 顶象滑块)
+        //
+        //   与「北京银行演示版」是两条完全不同的流程，别混：
+        //     演示版 :9081  = 企业号 + 证书密码 + 登录密码
+        //     查询版 443    = 账号 + 密码 + 顶象滑块        ← 本配置
+        //
+        //   路由条件：config.json 里该 bank 的 loginUrl 含 version=query
+        //   → 自动进 BCBPlugin::LoginQuery()，演示版 Login() 一行不动。
+        //
+        //   前置由 preLaunchTask「Debug BCB Query (prepare)」自动完成：
+        //     1. Ensure Chrome CDP 9222（未就绪则用 boj_hw_profile2 自动拉起）
+        //        —— 查询版必须走真实浏览器 + 有缓存的 profile，否则顶象
+        //           风控更容易直接降级成「请使用图形验证码」
+        //     2. Kill stale newrpa（否则链接器写 exe 会 Permission denied）
+        //     3. mingw32-make 增量编译 → 拷插件 DLL 到 bin/plugins
+        //
+        //   断点建议：
+        //     plugins/bcb/BCBPlugin.cpp        LoginQuery / AutoSlideOnce /
+        //                                      ManualTakeover / DetectGap
+        //     core/src/keyBoard/SkKeyBoard.cpp 硬件键盘 HID 帧
+        //     core/src/keyBoard/HidMouse.cpp   TrackRel 轨迹 / drain
+        //
+        //   ⚠ 顶象对自动化拖拽会做环境级降级，流程是「自动试 3 次 → 鸣笛唤人」。
+        //     人工等待窗口只有 150s：建议先 F5 完整跑通一遍再下断点；
+        //     若要停在 ManualTakeover，continue 之后请立刻手工拖滑块。
+        // ================================================================
+        {
+            "name": "★★ BOBQ 北京银行查询版 (login, 滑块)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--bank", "BOBQ",
+                "--action", "login",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "插件代码在 libbcb.dll 里，DLL 是运行时才 LoadLibrary 的。开启 pending 断点，否则在 exe 里找不到 BCBPlugin.cpp:xxxx 会导致断点直接失效", "text": "set breakpoint pending on", "ignoreFailures": true },
+                { "description": "Enable pretty print", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "不要因 SIGPIPE 在无关第三方库停住", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Debug BCB Query (prepare)",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
         {
             "name": "★KLB 昆仑银行 登录(硬件键盘)",
             "type": "cppdbg",
@@ -114,8 +174,7 @@
                 "run",
                 "--config", "${workspaceFolder}/build-mingw/bin/config.json",
                 "--bank", "KLB",
-                "--action", "login",
-                "--no-launch", "--chrome-port", "9333"
+                "--action", "login", "--chrome-port", "9333"
             ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [

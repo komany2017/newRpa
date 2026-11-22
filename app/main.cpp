@@ -140,7 +140,7 @@ struct Args {
         next(a.paccno);
       else if (s == "--no")
         next(a.no);
-      else if (s == "--chrome-port") {
+      else if (s == "--chrome-port" || s == "--port") {   // --port 是 chrome 子命令的简写
         if (i + 1 < argc) {
           a.chromePort = std::atoi(argv[++i]);
         }
@@ -175,14 +175,24 @@ int MainInit(const std::string &cfgPath) {
   return 0;
 }
 
-int MainChrome(const Args &args) {
+int MainChrome(const Args &args, const newrpa::util::GlobalConfig &cfg) {
   newrpa::chrome::ChromeLauncher::Options opts;
   if (!args.profileDir.empty())
     opts.userDataDir = args.profileDir;
+  else if (!cfg.chromeProfileDir.empty())
+    opts.userDataDir = cfg.chromeProfileDir;
   if (args.chromePort)
     opts.port = args.chromePort;
-  if (args.headless)
+  else if (cfg.chromePort > 0)
+    opts.port = cfg.chromePort;
+  if (args.headless || cfg.headless)
     opts.headless = true;
+  if (!cfg.chromePath.empty())
+    opts.executablePath = cfg.chromePath;
+  // 与 run 命令一致的启动参数 / prefs / 扩展
+  opts.extraArgs = cfg.chromeArgs;
+  opts.prefsJson = cfg.chromePrefsJson;
+  opts.extensions = cfg.extensionPaths;
 
   newrpa::chrome::ChromeLauncher launcher(opts);
   if (!launcher.Launch()) {
@@ -217,11 +227,11 @@ using namespace DES;
 int MainRun(const Args &args, const newrpa::util::GlobalConfig &cfg) {
   try {
 
-      std::string des = "482f51f3e779190c";
-      char inbuf[DESPAGE] = { 0 };
-      char outbuf[DESPAGE] = { 0 };
-      memcpy(inbuf, des.c_str(), des.length());
-      int len = DesDecrypt(inbuf, outbuf);
+      // std::string des = "482f51f3e779190c";
+      // char inbuf[DESPAGE] = { 0 };
+      // char outbuf[DESPAGE] = { 0 };
+      // memcpy(inbuf, des.c_str(), des.length());
+      // int len = DesDecrypt(inbuf, outbuf);
 
     // 1. 找到目标银行
     const newrpa::plugin::BankConfig *bankCfg = nullptr;
@@ -270,6 +280,8 @@ int MainRun(const Args &args, const newrpa::util::GlobalConfig &cfg) {
       // 从配置注入 Chrome 启动参数与 prefs
       opts.extraArgs = cfg.chromeArgs;
       opts.prefsJson = cfg.chromePrefsJson;
+      // 解压版扩展（--load-extension）；Chrome ≥137 的开关由 ChromeLauncher 自动补
+      opts.extensions = cfg.extensionPaths;
       launcher = std::make_unique<newrpa::chrome::ChromeLauncher>(opts);
       if (!launcher->Launch()) {
         spdlog::error("Chrome launch failed");
@@ -716,7 +728,7 @@ int main(int argc, char **argv) {
   if (args.cmd == "init")
     return MainInit(args.config);
   if (args.cmd == "chrome")
-    return MainChrome(args);
+    return MainChrome(args, newrpa::util::LoadConfig(args.config));
 
   auto cfg = newrpa::util::LoadConfig(args.config);
 

@@ -52,6 +52,50 @@
         },
 
         // =================================================================
+        // 2b. 单文件语法检查（-fsyntax-only，不链接、不产出 obj）
+        //     用途：只想快速看某个文件有没有编译错误时用，比整包 build 快得多。
+        //     为什么需要它：VS Code 右键菜单的「单独编译」是裸 g++，不带 -I，
+        //     会报 newrpa/cdp/CDPDomains.h: No such file or directory。
+        //     本项目的 include 路径由 CMake 注入（见 build-mingw 下的 includes_CXX.rsp），
+        //     这里取各目标路径的并集，所以任何源文件都能查。
+        //     用法：打开目标 .cpp → Ctrl+Shift+P → Tasks: Run Task →
+        //           「C++: 语法检查当前文件」，或直接绑快捷键。
+        // =================================================================
+        {
+            "label": "C++: 语法检查当前文件",
+            "type": "shell",
+            "command": "E:/Workdaddy/mingw64/bin/g++.exe",
+            "args": [
+                "-fsyntax-only",
+                "-std=c++17",
+                "-pthread",
+                "-DNEWRPA_USE_DLL",
+                "-DSPDLOG_COMPILED_LIB",
+                "-DNOMINMAX",
+                "-I${workspaceFolder}/core/include",
+                "-I${workspaceFolder}/core/src/keyBoard",
+                "-I${workspaceFolder}/core/include/newrpa/singleUsbbox",
+                "-I${workspaceFolder}/core/src/des",
+                "-I${workspaceFolder}/third_party/nlohmann_json/include",
+                "-I${workspaceFolder}/third_party/spdlog/include",
+                "-isystem", "${workspaceFolder}/third_party/cpp_httplib",
+                "${file}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
+                }
+            },
+            "problemMatcher": ["$gcc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+
+        // =================================================================
         // 3. 插件 DLL 自动复制到 bin/plugins — build 完自动跑
         //    只拷银行插件（排除 NewRpaCore.dll，它不是插件，加载会报错）
         // =================================================================
@@ -89,6 +133,43 @@
             "label": "Build + Copy DLLs",
             "dependsOrder": "sequence",
             "dependsOn": [
+                "Kill stale newrpa",
+                "CMake: build (Debug)",
+                "Copy DLLs to plugins/"
+            ],
+            "problemMatcher": []
+        },
+
+        // =================================================================
+        // 4b. Ensure Chrome CDP 9222 — 北京银行查询版 F5 专用前置
+        //     查询版必须走真实浏览器 + 有缓存的 profile（boj_hw_profile2），
+        //     否则顶象风控更容易直接降级成「请使用图形验证码」。
+        //     已就绪则秒过；未就绪则自动拉起 chrome-portable。
+        // =================================================================
+        {
+            "label": "Ensure Chrome CDP 9222",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-Command",
+                "$ErrorActionPreference='Stop'; $port=9222; $ready=$false; try { $r=Invoke-RestMethod -Uri \"http://127.0.0.1:$port/json/version\" -TimeoutSec 3; $ready=$true; Write-Host ('CDP READY: ' + $r.Browser) } catch { }; if (-not $ready) { $chrome='C:\\Program Files\\chrome-portable\\chrome-win64\\chrome.exe'; if (-not (Test-Path $chrome)) { $chrome='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' }; if (-not (Test-Path $chrome)) { Write-Host 'ERROR: 找不到 chrome.exe'; exit 1 }; $ud='E:/NewRpa-Next/build-mingw/bin/boj_hw_profile2'; Write-Host ('CDP not ready, launching: ' + $chrome); Start-Process -FilePath $chrome -ArgumentList @('--remote-debugging-port=9222', ('--user-data-dir=' + $ud), '--no-first-run', '--no-default-browser-check', 'https://cbank.bankofbeijing.com.cn/login?redirect=%2F&version=query') -WindowStyle Normal; $ok=$false; for ($i=0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; try { $r=Invoke-RestMethod -Uri \"http://127.0.0.1:$port/json/version\" -TimeoutSec 2; $ok=$true; break } catch { } }; if (-not $ok) { Write-Host 'ERROR: CDP 9222 启动超时'; exit 1 }; Write-Host ('CDP STARTED: ' + $r.Browser) }"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+
+        // =================================================================
+        // 4c. F5 前置链（北京银行查询版）：确保 Chrome → 杀残留 → build → 拷 DLL
+        // =================================================================
+        {
+            "label": "Debug BCB Query (prepare)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Ensure Chrome CDP 9222",
                 "Kill stale newrpa",
                 "CMake: build (Debug)",
                 "Copy DLLs to plugins/"

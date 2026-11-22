@@ -1,7 +1,8 @@
 {
     // ============================================================
     // NewRpa-Next — VSCode 工作区设置
-    // MinGW g++ + CMake Tools + gdb 调试
+    // 工具链: MinGW g++ 16.2.0 (x86_64-win32-seh) + CMake + gdb
+    // IntelliSense 主力: ms-vscode.cpptools（读 build-mingw/compile_commands.json）
     // ============================================================
 
     // --- CMake Tools ---
@@ -16,13 +17,13 @@
         "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin"
     },
 
-    // --- C/C++ (ms-vscode.cpptools) ---
+    // --- C/C++ (ms-vscode.cpptools) — IntelliSense 唯一来源 ---
     "C_Cpp.default.compilerPath": "E:/Workdaddy/mingw64/bin/g++.exe",
     "C_Cpp.default.intelliSenseMode": "windows-gcc-x64",
     "C_Cpp.default.cStandard": "c17",
     "C_Cpp.default.cppStandard": "c++17",
-    // 编译数据库：跳转/查找引用的唯一权威来源（CMake configure 自动更新，
-    // 覆盖 core/plugins/app/keyBoard 全部源文件的真实 include 路径）
+    // 编译数据库：跳转/查找引用的唯一权威来源（CMakeLists 里
+    // CMAKE_EXPORT_COMPILE_COMMANDS=ON，每次 configure 自动刷新）
     "C_Cpp.default.compileCommands": "${workspaceFolder}/build-mingw/compile_commands.json",
     // 兜底（对不在数据库里的零散头文件生效）
     "C_Cpp.default.includePath": [
@@ -32,7 +33,8 @@
         "${workspaceFolder}/app/**",
         "${workspaceFolder}/third_party/nlohmann_json/include",
         "${workspaceFolder}/third_party/cpp_httplib",
-        "${workspaceFolder}/third_party/spdlog/include"
+        "${workspaceFolder}/third_party/spdlog/include",
+        "E:/Workdaddy/mingw64/x86_64-w64-mingw32/include"
     ],
     // 标签浏览（Find All References / 工作区符号搜索）
     "C_Cpp.default.browse.path": [
@@ -43,23 +45,82 @@
     ],
     "C_Cpp.default.defines": [
         "_WIN32",
-        "NOMINMAX"
+        "NOMINMAX",
+        "WIN32_LEAN_AND_MEAN",
+        "UNICODE",
+        "_UNICODE"
     ],
+    "C_Cpp.intelliSenseEngine": "default",
+    "C_Cpp.intelliSenseEngineFallback": "enabled",
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.enhancedColorization": "enabled",
+    "C_Cpp.autocompleteAddParentheses": true,
 
-    // --- 格式化 ---
+    // --- clangd：让位给 cpptools，只保留参数以免它报"找不到头文件" ---
+    // 现状：clangd 与 cpptools 两个引擎同时装会各自出波浪线。
+    // 本工作区的约定是 **cpptools 负责 IntelliSense**（见上），clangd 不接管。
+    // 彻底消除双份诊断，二选一（改完重载窗口）：
+    //   A) 保留 cpptools（推荐）：扩展面板搜 clangd → Disable (Workspace)
+    //   B) 改用 clangd：把上面 "C_Cpp.intelliSenseEngine" 改成 "disabled"，
+    //      cpptools 仍会提供 F5 调试（cppdbg 独立于 IntelliSense 引擎）
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build-mingw",
+        "--query-driver=E:/Workdaddy/mingw64/bin/g++.exe",
+        "--background-index",
+        "--header-insertion=never",
+        "--clang-tidy=false",
+        "--pch-storage=memory"
+    ],
+    "clangd.checkUpdates": false,
+    "clangd.onConfigChanged": "restart",
+
+    // --- 格式化（clang-format 规则见项目根 .clang-format）---
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "file",
+    // 不设 clang_format_path → 用 cpptools 内置 clang-format 23.1.1
+    // （已实测能完整解析项目根 .clang-format）
+    // 注意：故意不开 formatOnSave —— 现有代码风格混用 K&R/Allman，
+    // 自动全量格式化会产生大量无关 diff。需要时用 Shift+Alt+F 手动格式化当前文件。
+    "editor.formatOnSave": false,
+
+    // --- 编码：源文件为 UTF-8 无 BOM（含中文注释），强制按 UTF-8 打开 ---
+    "files.encoding": "utf8",
+    "files.autoGuessEncoding": false,
+    "files.eol": "\n",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
 
     // --- 文件关联 ---
     "files.associations": {
-        "*.hpp": "cpp"
+        "*.hpp": "cpp",
+        "*.h": "cpp"
     },
     "files.exclude": {
         "**/build-mingw": true,
         "**/.git": true
     },
+    "search.exclude": {
+        "**/build-mingw": true,
+        "**/third_party": false
+    },
 
-    // --- 终端环境 ---
+    // --- 编辑体验 ---
+    "editor.rulers": [100],
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "editor.renderWhitespace": "boundary",
+    "editor.suggestSelection": "first",
+    "editor.minimap.maxColumn": 100,
+    "editor.stickyScroll.enabled": true,
+    "editor.bracketPairColorization.enabled": true,
+    "editor.guides.bracketPairs": "active",
+
+    // --- 终端环境（打开集成终端即带上 MinGW）---
+    // 默认用 Git Bash：PowerShell 5.1 不支持 `&&`，而本项目的脚本/命令大量使用它
+    // （踩过坑：`cd build-mingw/bin && ./newrpa.exe` 在 PowerShell 里直接语法报错）
+    // 想换回 PowerShell：把下面一行改成 "PowerShell"，命令里改用 `;` 分隔
+    "terminal.integrated.defaultProfile.windows": "Git Bash",
     "terminal.integrated.env.windows": {
         "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
     }

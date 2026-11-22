@@ -73,6 +73,12 @@ GlobalConfig LoadConfig(const std::string& path) {
             if (a.is_string()) cfg.chromeArgs.push_back(a.get<std::string>());
         spdlog::info("[Config] chromeArgs: {} item(s)", cfg.chromeArgs.size());
     }
+    // 解压版扩展目录（--load-extension）
+    if (j.contains("extensionPaths") && j["extensionPaths"].is_array()) {
+        for (auto& e : j["extensionPaths"])
+            if (e.is_string()) cfg.extensionPaths.push_back(e.get<std::string>());
+        spdlog::info("[Config] extensionPaths: {} item(s)", cfg.extensionPaths.size());
+    }
     if (j.contains("chromePrefs")) {
         cfg.chromePrefsJson = j["chromePrefs"].dump();
         spdlog::info("[Config] chromePrefs: {} bytes", cfg.chromePrefsJson.size());

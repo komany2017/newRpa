@@ -14,6 +14,7 @@
 #include <sstream>
 #include <filesystem>
 #include <stdexcept>
+#include <algorithm>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -118,6 +119,75 @@ bool ChromeLauncher::Launch() {
         if (a.rfind("--enable-extensions", 0) == 0) { enableExt = true; break; }
     }
 
+    // ------------------------------------------------------------------
+    // 扩展加载：--load-extension / --disable-extensions-except
+    // Chrome ≥137（M137）默认忽略 --load-extension，必须同时给
+    //   --disable-features=DisableLoadExtensionCommandLineSwitch
+    // 否则命令行看似正常、扩展却完全不加载（无任何报错）。
+    // 这里只要有扩展要加载，或用户在 chromeArgs 里自己写了 --load-extension，
+    // 就自动把该开关补上；用户已自行指定 --disable-features 时做合并追加。
+    // ------------------------------------------------------------------
+    std::vector<std::string> extDirs = opts_.extensions;
+    bool userPassedLoadExt = false;
+    for (auto& a : opts_.extraArgs) {
+        if (a.rfind("--load-extension", 0) == 0) {
+            userPassedLoadExt = true;
+            // --load-extension=dir1,dir2
+            auto eq = a.find('=');
+            if (eq != std::string::npos) {
+                std::string v = a.substr(eq + 1);
+                size_t p = 0;
+                while (p <= v.size()) {
+                    auto c = v.find(',', p);
+                    std::string one = v.substr(p, c == std::string::npos ? std::string::npos : c - p);
+                    if (!one.empty()) extDirs.push_back(one);
+                    if (c == std::string::npos) break;
+                    p = c + 1;
+                }
+            }
+        }
+    }
+    const bool wantExt = !extDirs.empty();
+
+    // 拼扩展目录列表
+    std::string extList;
+    for (auto& d : extDirs) {
+        if (!extList.empty()) extList += ",";
+        extList += d;
+    }
+
+    // 处理 --disable-features 合并（DisableLoadExtensionCommandLineSwitch）
+    std::vector<std::string> extraArgs = opts_.extraArgs;
+    if (wantExt) {
+        const char* kSwitch = "DisableLoadExtensionCommandLineSwitch";
+        bool patched = false;
+        for (auto& a : extraArgs) {
+            if (a.rfind("--disable-features=", 0) == 0) {
+                if (a.find(kSwitch) == std::string::npos) {
+                    a += ","; a += kSwitch;      // 合并进用户已有的列表
+                }
+                patched = true;
+                break;
+            }
+        }
+        if (!patched)
+            extraArgs.push_back(std::string("--disable-features=") + kSwitch);
+        // 有扩展要加载时，去掉会一票否决的 --disable-extensions
+        extraArgs.erase(
+            std::remove(extraArgs.begin(), extraArgs.end(), std::string("--disable-extensions")),
+            extraArgs.end());
+        enableExt = true;
+        // 未显式给 --load-extension 时由这里加上（用户自己给了就不重复）
+        if (!userPassedLoadExt)
+            extraArgs.push_back("--load-extension=" + extList);
+        // 只允许这些扩展，防止 profile 里别的扩展干扰
+        bool hasExcept = false;
+        for (auto& a : extraArgs)
+            if (a.rfind("--disable-extensions-except", 0) == 0) { hasExcept = true; break; }
+        if (!hasExcept)
+            extraArgs.push_back("--disable-extensions-except=" + extList);
+    }
+
     // 组装命令行
     std::ostringstream cmd;
     cmd << "\"" << opts_.executablePath << "\"";
@@ -137,7 +207,7 @@ bool ChromeLauncher::Launch() {
     cmd << " --password-store=basic";
     cmd << " --use-mock-keychain";
     // 追加配置里的 Chrome 启动参数（含空格的用引号包裹，如 user-agent）
-    for (auto& a : opts_.extraArgs) {
+    for (auto& a : extraArgs) {
         if (a.empty()) continue;
         if (a.find(' ') != std::string::npos && a.front() != '"')
             cmd << " \"" << a << "\"";
@@ -147,6 +217,8 @@ bool ChromeLauncher::Launch() {
     cmd << " about:blank";
 
     std::string cmdStr = cmd.str();
+    if (wantExt)
+        spdlog::info("[Chrome] 扩展加载: {} 个 -> {}", extDirs.size(), extList);
     spdlog::info("[Chrome] Launch: {}", cmdStr);
 
 #if defined(_WIN32)
