@@ -12,6 +12,9 @@ add_library(NewRpaCore SHARED
     src/util/Config.cpp              # 含 HttpClient/ExcelWriter/Crypto 桩
     src/util/StringUtils.cpp
     src/util/LogSetup.cpp            # 控制台 + 滚动日志文件
+    src/ocr/ChaojiyingOcr.cpp        # 超级鹰打码（公共 OCR）
+    src/des/xskydes.cpp              # DES 加解密（公共 crypto）
+    src/des/DesBase64.cpp            # Base64 编解码（公共 crypto）
 )
 
 target_include_directories(NewRpaCore

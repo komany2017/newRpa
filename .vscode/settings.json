@@ -21,11 +21,25 @@
     "C_Cpp.default.intelliSenseMode": "windows-gcc-x64",
     "C_Cpp.default.cStandard": "c17",
     "C_Cpp.default.cppStandard": "c++17",
+    // 编译数据库：跳转/查找引用的唯一权威来源（CMake configure 自动更新，
+    // 覆盖 core/plugins/app/keyBoard 全部源文件的真实 include 路径）
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build-mingw/compile_commands.json",
+    // 兜底（对不在数据库里的零散头文件生效）
     "C_Cpp.default.includePath": [
         "${workspaceFolder}/core/include",
+        "${workspaceFolder}/core/src/**",
+        "${workspaceFolder}/plugins/**",
+        "${workspaceFolder}/app/**",
         "${workspaceFolder}/third_party/nlohmann_json/include",
         "${workspaceFolder}/third_party/cpp_httplib",
         "${workspaceFolder}/third_party/spdlog/include"
+    ],
+    // 标签浏览（Find All References / 工作区符号搜索）
+    "C_Cpp.default.browse.path": [
+        "${workspaceFolder}/core/**",
+        "${workspaceFolder}/plugins/**",
+        "${workspaceFolder}/app/**",
+        "${workspaceFolder}/third_party/**"
     ],
     "C_Cpp.default.defines": [
         "_WIN32",

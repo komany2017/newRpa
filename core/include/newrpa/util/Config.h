@@ -31,6 +31,13 @@ struct GlobalConfig {
     std::string heartbeatUrl;
     int         heartbeatIntervalSec = 3600;
 
+    // 超级鹰打码（公共 OCR，凭据也可用环境变量 CJY_* 覆盖）
+    std::string ocrUser;
+    std::string ocrPass;
+    std::string ocrSoftId;
+    std::string ocrUrl;       // 空 = 官方默认接口
+    std::string ocrCodeType;  // 空 = 1004（4位英文数字）
+
     // 日志
     std::string logLevel = "info";
     std::string logFile;          // 空 = 控制台

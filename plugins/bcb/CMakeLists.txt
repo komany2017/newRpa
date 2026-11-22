@@ -11,7 +11,7 @@ set_target_properties(bcb_plugin PROPERTIES
 )
 
 target_link_libraries(bcb_plugin
-    PRIVATE NewRpaCore NewRpaPluginApi
+    PRIVATE NewRpaCore NewRpaPluginApi winhttp
 )
 
 install(TARGETS bcb_plugin

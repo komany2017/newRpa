@@ -40,6 +40,8 @@ struct NEWRPA_API BankConfig {
     std::string routeType;
     std::string bankType;
     std::string note;         // 备注
+    std::string chromeProfileDir; // 按银行覆盖 Chrome profile（空 = 用全局 chromeProfileDir）
+    int         chromePort = 0;   // 按银行覆盖 CDP 端口（0 = 用全局 chromePort）
 };
 
 // 单笔流水/交易记录（和旧项目 Huidan 对应）
@@ -134,6 +136,12 @@ public:
     // 默认不支持；支持的插件（如 BCB）重写此方法。
     virtual std::string RunAllAccounts() {
         return std::string("all-accounts not supported by ") + GetId();
+    }
+
+    // 混合模式：CDP 登录后，改用纯 HTTP 直连接口下载数据。
+    // 默认不支持；支持的插件（如 BCB）重写此方法。
+    virtual std::string HttpDirect() {
+        return std::string("http-direct not supported by ") + GetId();
     }
 
     // --- 工具 ---

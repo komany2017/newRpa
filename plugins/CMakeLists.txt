@@ -2,3 +2,4 @@
 
 add_subdirectory(icbc)
 add_subdirectory(bcb)
+add_subdirectory(klb)

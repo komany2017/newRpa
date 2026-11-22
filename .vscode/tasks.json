@@ -53,6 +53,7 @@
 
         // =================================================================
         // 3. 插件 DLL 自动复制到 bin/plugins — build 完自动跑
+        //    只拷银行插件（排除 NewRpaCore.dll，它不是插件，加载会报错）
         // =================================================================
         {
             "label": "Copy DLLs to plugins/",
@@ -60,19 +61,35 @@
             "command": "powershell",
             "args": [
                 "-NoProfile", "-Command",
-                "$dst='${workspaceFolder}/build-mingw/bin/plugins'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Get-ChildItem '${workspaceFolder}/build-mingw/bin/*.dll' | ForEach-Object { Copy-Item $_.FullName $dst -Force; Write-Host \"Copy $($_.Name) -> plugins/\" }"
+                "$dst='${workspaceFolder}/build-mingw/bin/plugins'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Get-ChildItem '${workspaceFolder}/build-mingw/bin/*.dll' | Where-Object { $_.Name -notlike '*NewRpaCore*' } | ForEach-Object { Copy-Item $_.FullName $dst -Force; Write-Host \"Copy $($_.Name) -> plugins/\" }"
             ],
-            "problemMatcher": [],
-            "dependsOn": "CMake: build (Debug)"
+            "problemMatcher": []
         },
 
         // =================================================================
-        // 4. preLaunchTask 组合：build + copy dlls
+        // 3b. 杀掉上次调试残留的 newrpa.exe
+        //     （不杀的话链接器写 newrpa.exe 会 Permission denied，
+        //       F5 编译直接失败，这是最常见的"F5 不重新编译"原因）
+        // =================================================================
+        {
+            "label": "Kill stale newrpa",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-Command",
+                "$p = Get-Process newrpa -ErrorAction SilentlyContinue; if ($p) { $p | Stop-Process -Force; Start-Sleep -Milliseconds 500; Write-Host ('Killed stale newrpa.exe pid=' + ($p.Id -join ',')) } else { Write-Host 'No stale newrpa.exe' }"
+            ],
+            "problemMatcher": []
+        },
+
+        // =================================================================
+        // 4. preLaunchTask 组合：杀残留 → build → copy dlls
         // =================================================================
         {
             "label": "Build + Copy DLLs",
             "dependsOrder": "sequence",
             "dependsOn": [
+                "Kill stale newrpa",
                 "CMake: build (Debug)",
                 "Copy DLLs to plugins/"
             ],

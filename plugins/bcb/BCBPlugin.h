@@ -134,6 +134,9 @@ private:
     // all-accounts：遍历所有账号下载四类数据；返回统计信息
     std::string RunAllAccounts();
 
+    // 混合模式：CDP 登录建会话后，用纯 HTTP 直连下载静态数据文件
+    std::string HttpDirect() override;
+
 private:
     plugin::BankConfig                    cfg_;
     std::shared_ptr<cdp::CDPSession>      session_;

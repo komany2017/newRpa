@@ -52,6 +52,21 @@ GlobalConfig LoadConfig(const std::string& path) {
     cfg.logLevel        = j.value("logLevel",        "info");
     cfg.logFile         = j.value("logFile",         "");
 
+    // 超级鹰打码（公共，凭据不进日志）
+    if (j.contains("ocr") && j["ocr"].is_object()) {
+        auto& o = j["ocr"];
+        cfg.ocrUser     = o.value("user",     "");
+        cfg.ocrPass     = o.value("pass",     "");
+        cfg.ocrSoftId   = o.value("softid",   "");
+        cfg.ocrUrl      = o.value("url",      "");
+        cfg.ocrCodeType = o.value("codetype", "");
+        spdlog::info("[Config] ocr section: {}",
+                     (cfg.ocrUser.empty() || cfg.ocrPass.empty() ||
+                      cfg.ocrSoftId.empty())
+                         ? "incomplete (env CJY_* can fill gaps)"
+                         : "configured");
+    }
+
     // Chrome 启动参数 / prefs / excludeSwitches
     if (j.contains("chromeArgs") && j["chromeArgs"].is_array()) {
         for (auto& a : j["chromeArgs"])
@@ -87,6 +102,8 @@ GlobalConfig LoadConfig(const std::string& path) {
         bc.company      = b.value("company",      "");
         bc.routeType    = b.value("routeType",    "");
         bc.bankType     = b.value("bankType",     "");
+        bc.chromeProfileDir = b.value("chromeProfileDir", "");
+        bc.chromePort       = b.value("chromePort",   0);
         cfg.banks.push_back(std::move(bc));
     }
     return cfg;
@@ -103,6 +120,13 @@ void SaveDefaultConfig(const std::string& path) {
         {"heartbeatIntervalSec", 3600},
         {"logLevel", "info"},
         {"logFile", ""},
+        {"ocr", {
+            {"user", ""},
+            {"pass", ""},
+            {"softid", ""},
+            {"url", ""},
+            {"codetype", "1004"}
+        }},
         {"banks", json::array({
             {
                 {"bankName", "ICBC"},
@@ -144,9 +168,16 @@ HttpResponse HttpClient::Post(const std::string& url,
                                const std::string& contentType,
                                const std::map<std::string, std::string>& headers) {
     HttpResponse r;
-    std::string host, path;
+    std::string host, path, scheme = "http://";
     if (url.find("https://") == 0) {
         host = url.substr(8);
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        scheme = "https://";
+#else
+        // 当前构建未链 OpenSSL（httplib 无 SSL），https 只能降级成 http
+        spdlog::warn("[HttpClient] https not supported in this build (no OpenSSL), "
+                     "downgrade to http: {}", url);
+#endif
     } else if (url.find("http://") == 0) {
         host = url.substr(7);
     } else {
@@ -163,7 +194,7 @@ HttpResponse HttpClient::Post(const std::string& url,
 
     auto t0 = std::chrono::steady_clock::now();
 
-    httplib::Client cli("http://" + host);
+    httplib::Client cli(scheme + host);
     cli.set_connection_timeout(connectTimeoutSec_);
 
     httplib::Headers hdrs;
@@ -291,16 +322,89 @@ std::string WriteCurBalCsv(
 } // namespace newrpa
 
 // ----------------------------------------------------------------------------
-// Crypto — 桩（等 OpenSSL 3.x 编好了再填）
+// Crypto — Md5 自实现（RFC 1321，超级鹰 pass2 用）；Sha256/AES 仍为桩
 // ----------------------------------------------------------------------------
 #include "newrpa/crypto/Crypto.h"
 
 namespace newrpa {
 namespace crypto {
 
-std::string Md5(const std::string& s) {
-    spdlog::warn("[Crypto] Md5 not implemented (stub) — open lib link to OpenSSL 3.x");
-    return "";
+namespace {
+
+inline uint32_t Md5Rotl(uint32_t x, int c) {
+    return (x << c) | (x >> (32 - c));
+}
+
+// K[i] = floor(abs(sin(i+1)) * 2^32) 的标准常数表
+const uint32_t kMd5K[64] = {
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
+};
+
+const int kMd5S[64] = {
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+};
+
+} // namespace
+
+std::string Md5(const std::string& msg) {
+    std::string data = msg;
+    const uint64_t bitLen = static_cast<uint64_t>(msg.size()) * 8;
+    data.push_back(static_cast<char>(0x80));
+    while (data.size() % 64 != 56) data.push_back('\0');
+    for (int i = 0; i < 8; ++i)
+        data.push_back(static_cast<char>((bitLen >> (8 * i)) & 0xFF));
+
+    uint32_t h0 = 0x67452301, h1 = 0xefcdab89,
+             h2 = 0x98badcfe, h3 = 0x10325476;
+
+    for (size_t off = 0; off < data.size(); off += 64) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(data.data()) + off;
+        uint32_t M[16];
+        for (int i = 0; i < 16; ++i)
+            M[i] = p[i * 4] | (p[i * 4 + 1] << 8) |
+                   (p[i * 4 + 2] << 16) | (uint32_t(p[i * 4 + 3]) << 24);
+
+        uint32_t A = h0, B = h1, C = h2, D = h3;
+        for (int i = 0; i < 64; ++i) {
+            uint32_t F;
+            int g;
+            if (i < 16)      { F = (B & C) | (~B & D); g = i; }
+            else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+            else if (i < 48) { F = B ^ C ^ D;          g = (3 * i + 5) % 16; }
+            else             { F = C ^ (B | ~D);       g = (7 * i) % 16; }
+            F += A + kMd5K[i] + M[g];
+            A = D; D = C; C = B;
+            B += Md5Rotl(F, kMd5S[i]);
+        }
+        h0 += A; h1 += B; h2 += C; h3 += D;
+    }
+
+    // 摘要 4 个字按小端字节序逐字节输出 32 位 hex
+    const uint32_t hs[4] = { h0, h1, h2, h3 };
+    char out[33] = {};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            snprintf(out + (i * 4 + j) * 2, 3, "%02x",
+                     (hs[i] >> (8 * j)) & 0xFF);
+    return std::string(out);
 }
 
 std::string Sha256(const std::string& s) {

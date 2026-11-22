@@ -22,7 +22,7 @@ public:
     ICBCPlugin();
     ~ICBCPlugin() override;
 
-    const char* GetId()           const override { return "newrpa.icbc"; }
+    const char* GetId()           const override { return "ICBC"; }
     const char* GetDisplayName()  const override { return "中国工商银行"; }
     uint32_t    Capabilities()     const override;
 

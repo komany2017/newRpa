@@ -53,6 +53,22 @@
         "enable-automation"
     ],
 
+    "_httpTasks_note": "http-session 通用取数任务列表；支持占位符 {origin} {bank} {date} {timestamp}。Cookie 从 RPA 登录后的浏览器自动抓取并注入。",
+    "httpTasks": [
+        {
+            "name": "当日交易",
+            "url": "{origin}/cdn/demoYSB/AM/AM2/AM2DLZThatDay.dlz",
+            "saveAs": "HTTP_当日交易_{timestamp}.dlz",
+            "method": "GET"
+        },
+        {
+            "name": "历史交易",
+            "url": "{origin}/cdn/demoYSB/AM/AM2/AM2DLZHistory.dlz",
+            "saveAs": "HTTP_历史交易_{timestamp}.dlz",
+            "method": "GET"
+        }
+    ],
+
     "pluginDir": "./plugins",
     "logLevel": "info",
 

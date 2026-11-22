@@ -10,6 +10,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 导出编译数据库（compile_commands.json）—— VSCode 跳转/补全靠它精确定位
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Windows DLL 导出所有符号（MinGW/MSVC 通用）
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 

@@ -11,6 +11,7 @@
 #include "BCBPlugin.h"
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/io/ExcelWriter.h"
+#include "newrpa/net/HttpDownloader.h"
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -491,7 +492,7 @@ std::string BCBPlugin::StateFilePath() {
 }
 
 std::string BCBPlugin::LoadLastHisEnd() {
-    std::string p = StateFilePath();
+    fs::path p = StateFilePath();
     std::ifstream f(p);
     if (!f) return "";
     try {
@@ -570,7 +571,8 @@ std::string BCBPlugin::RunAllAccounts() {
     bool histranOK = true;
     GotoRoute("AM/AM2/TAM2A01");
     auto orgs = SelOptions(0);           // 机构
-    const int accIdxBase = 1;            // 账号 select 索引
+    const int accIdxBase = 1;            // 账号 select 索引    
+    std::multimap<std::string ,std::string> fileAccountMap;  
     for (size_t oi = 0; oi < orgs.size(); ++oi) {
         SetSelByValue(0, orgs[oi].second);
         std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -585,6 +587,7 @@ std::string BCBPlugin::RunAllAccounts() {
             std::string acctTag = accs[ai].second;
             std::string shortAcc = acctTag.size() >= 4 ? acctTag.substr(acctTag.size()-4) : acctTag;
             auto files = WaitForNewFiles(before, "历史交易_" + shortAcc, 9000);
+            fileAccountMap.insert(std::make_pair(shortAcc, files.empty() ? "无文件" : files[0]));
             okFiles += (int)files.size();
             detail += "  历史交易 " + shortAcc + ": " + std::to_string(files.size()) + " 文件\n";
         }
@@ -821,7 +824,9 @@ bool BCBPlugin::WriteBinaryFile(const std::string& path,
                                 const std::string& content) {
     try {
         fs::create_directories(fs::path(path).parent_path());
-        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        // 关键：必须传 fs::path（Unicode 版本），传 std::string 在 MinGW 下会按
+        // ANSI 代码页解读 UTF-8 中文，导致生成的文件名乱码（如 余额→浣欓）。
+        std::ofstream f(fs::path(path), std::ios::binary | std::ios::trunc);
         if (!f) return false;
         f.write(content.data(), content.size());
         return f.good();
@@ -1196,7 +1201,7 @@ std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBal() {
 
     std::vector<std::map<std::string, std::string>> result;
     // 从表格数据还原行
-    std::string jp = (fs::path(DownloadDir()) / "01_余额_data.json").string();
+    fs::path jp = fs::path(DownloadDir()) / "01_余额_data.json";
     std::ifstream jf(jp);
     if (jf) {
         std::stringstream ss; ss << jf.rdbuf();
@@ -1241,7 +1246,7 @@ std::vector<plugin::Transaction> BCBPlugin::GetHisTran(
     auto files = DoExport("AM/AM2/TAM2A01", tag);
 
     std::vector<plugin::Transaction> result;
-    std::string jp = (fs::path(DownloadDir()) / (tag + "_data.json")).string();
+    fs::path jp = fs::path(DownloadDir()) / (tag + "_data.json");
     std::ifstream jf(jp);
     if (jf) {
         std::stringstream ss; ss << jf.rdbuf();
@@ -1319,6 +1324,106 @@ std::string BCBPlugin::Approval(const std::string& no) {
 std::string BCBPlugin::Query(const std::string& no) {
     spdlog::warn("[BCB] Query stub");
     return "stub";
+}
+
+// ----------------------------------------------------------------------------
+// HttpDirect — 混合模式：CDP 登录建会话，之后纯 HTTP 直连下载数据
+//
+// 抓包结论（2026-11-21）：
+//   演示版没有真正的会话型业务 API，数据文件全部是静态资源：
+//     /cdn/demoYSB/AM/AM2/AM2DLZThatDay.dlz   当日交易 (GB2312 XML)
+//     /cdn/demoYSB/AM/AM2/AM2DLZHistory.dlz   历史交易 (GB2312 XML)
+//   这些文件免登录即可 GET（curl / WinHTTP 均验证 HTTP 200）。
+//   因此"登录走 RPA、取数走 HTTP"的实现是：
+//     1) 调 Login() 用 CDP 完成真实登录（保留浏览器会话、验证账号可用）
+//     2) 从页面 URL 提取 origin，拼出静态资源地址
+//     3) 用 HttpDownloader（WinHTTP/schannel）纯 HTTP 下载并落盘
+//     4) 统计每条流水的笔数，返回摘要
+// ----------------------------------------------------------------------------
+std::string BCBPlugin::HttpDirect() {
+    std::ostringstream summary;
+    summary << "=== BCB HTTP 直连 (CDP 登录 + HTTP 取数) ===\n";
+
+    // 1) CDP 登录建会话（用户要求：登录仍走 RPA）
+    std::string login = Login();
+    summary << "登录: " << login << "\n";
+    if (login != "ok" && login != "already logged in") {
+        summary << "登录失败，终止。\n";
+        spdlog::error("[HTTP-DIRECT] Login failed: {}", login);
+        return summary.str();
+    }
+
+    // 2) 从登录后的页面 URL 提取 origin（适配不同部署地址/端口）
+    std::string href = EvalStr("location.href");
+    std::string origin;
+    size_t schemePos = href.find("://");
+    if (schemePos != std::string::npos) {
+        size_t hostStart = schemePos + 3;
+        size_t slash = href.find('/', hostStart);
+        origin = href.substr(0, slash == std::string::npos ? href.size() : slash);
+    }
+    if (origin.empty()) {
+        origin = cfg_.loginUrl.empty()
+            ? "https://cbank.bankofbeijing.com.cn:9081"
+            : cfg_.loginUrl.substr(0, cfg_.loginUrl.find('/', 8));
+    }
+    summary << "Origin: " << origin << "\n";
+    spdlog::info("[HTTP-DIRECT] origin={}", origin);
+
+    // 3) 纯 HTTP 下载静态数据文件
+    net::HttpDownloader dl;
+    dl.SetIgnoreCertErrors(true);
+    dl.SetTimeout(30000);
+
+    struct Task { const char* name; const char* rel; const char* tag; };
+    std::vector<Task> tasks = {
+        {"当日交易", "/cdn/demoYSB/AM/AM2/AM2DLZThatDay.dlz",   "HTTP_当日交易"},
+        {"历史交易", "/cdn/demoYSB/AM/AM2/AM2DLZHistory.dlz",   "HTTP_历史交易"}
+    };
+
+    std::string dir = DownloadDir();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    int success = 0;
+    // 可读时间戳 YYYYMMDD_HHMMSS
+    char tbuf[32] = {0};
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm tmNow{};
+        localtime_s(&tmNow, &now);
+        std::strftime(tbuf, sizeof(tbuf), "%Y%m%d_%H%M%S", &tmNow);
+    }
+    std::string t0 = tbuf;
+    for (const auto& t : tasks) {
+        std::string url = origin + t.rel;
+        auto r = dl.Get(url);
+        if (!r.ok()) {
+            summary << t.name << ": 失败 — " << (r.error.empty() ? ("HTTP " + std::to_string(r.status)) : r.error) << "\n";
+            spdlog::error("[HTTP-DIRECT] {} failed: {} status={}", t.name, r.error, r.status);
+            continue;
+        }
+        // 落盘（GB2312 XML，原样保存字节）
+        std::string fname = std::string(t.tag) + "_" + t0 + ".dlz";
+        fs::path fp = fs::path(dir) / fname;
+        std::ofstream ofs(fp, std::ios::binary);
+        ofs.write(r.body.data(), static_cast<std::streamsize>(r.body.size()));
+        ofs.close();
+
+        // 统计 <Record> 笔数
+        int records = 0;
+        size_t p = 0;
+        while ((p = r.body.find("<Record", p)) != std::string::npos) { ++records; p += 7; }
+        summary << t.name << ": HTTP " << r.status << ", " << r.body.size()
+                << " 字节, " << records << " 笔 → " << fp.filename().string() << "\n";
+        spdlog::info("[HTTP-DIRECT] {} OK {} bytes {} records -> {}",
+                     t.name, r.body.size(), records, fp.filename().string());
+        ++success;
+    }
+
+    summary << "完成: " << success << "/" << tasks.size() << " 成功\n";
+    summary << "说明: 演示版数据为静态资源，免登录可读；登录步骤用 CDP 完成以验证会话。\n";
+    return summary.str();
 }
 
 } // namespace bcb
