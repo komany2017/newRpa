@@ -12,7 +12,7 @@ install(TARGETS newrpa RUNTIME DESTINATION bin)
 # desbase64 — DesBase64 编解码小工具（独立 exe，不依赖 NewRpaCore）
 # ----------------------------------------------------------------------------
 add_executable(desbase64
-    tools/desbase64_main.cpp
+    ../tools/desbase64_main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/des/DesBase64.cpp
 )
 
@@ -33,12 +33,12 @@ install(TARGETS desbase64 RUNTIME DESTINATION bin)
 # mouse_move — 单头盒子硬件鼠标 CLI（HidMouse 自测 / 调试工具）
 # ----------------------------------------------------------------------------
 add_executable(mouse_move
-    tools/mouse_move_main.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/keyBoard/HidMouse.cpp
+    ../tools/mouse_move_main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/singleUsbbox/HidMouse.cpp
 )
 
 target_include_directories(mouse_move PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/keyBoard                # HidMouse.cpp: #include "HidMouse.hpp"
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/singleUsbbox            # HidMouse.cpp: #include "HidMouse.hpp"
     ${CMAKE_CURRENT_SOURCE_DIR}/../core/include                     # mouse_move_main.cpp: "newrpa/singleUsbbox/HidMouse.hpp"
     ${CMAKE_CURRENT_SOURCE_DIR}/../core/include/newrpa/singleUsbbox # 兜底：裸名包含
 )

@@ -54,10 +54,14 @@ public:
     // 在 main frame 执行 JS，返回求值结果（json）
     json Evaluate(const std::string& expression,
                   const std::string& returnByValue = "true",
-                  int timeoutMs = 10000);
+                  int timeoutMs = 10000,
+                  bool awaitPromise = false);
 
     // 简化版：直接把 JS 当字符串运行，取 returnValue.value
     std::string EvalString(const std::string& js, int timeoutMs = 3000);
+
+    // 异步版：JS 返回 Promise，等待 resolve 后取 value（加载图片等场景）
+    std::string EvalStringAsync(const std::string& js, int timeoutMs = 10000);
     bool        EvalBool(const std::string& js, int timeoutMs = 3000);
     double      EvalNumber(const std::string& js, int timeoutMs = 3000);
 

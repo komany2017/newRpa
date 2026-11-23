@@ -2,13 +2,13 @@
 
 add_library(bcb_plugin SHARED
     BCBPlugin.cpp
-    ../../core/src/keyBoard/SkKeyBoard.cpp
-    ../../core/src/keyBoard/hid_box.cpp
-    ../../core/src/keyBoard/HidMouse.cpp
+    ../../core/src/singleUsbbox/SkKeyBoard.cpp
+    ../../core/src/singleUsbbox/hid_box.cpp
+    ../../core/src/singleUsbbox/HidMouse.cpp
 )
 
 target_include_directories(bcb_plugin PRIVATE
-    ../../core/src/keyBoard
+    ../../core/src/singleUsbbox
     ../../core/include/newrpa/singleUsbbox
 )
 

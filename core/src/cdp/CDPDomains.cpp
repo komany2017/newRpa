@@ -66,15 +66,23 @@ void PageDomain::CloseTarget(const std::string& targetId) {
 
 json RuntimeDomain::Evaluate(const std::string& expression,
                              const std::string& returnByValue,
-                             int timeoutMs) {
+                             int timeoutMs,
+                             bool awaitPromise) {
     return s_->Call("Runtime.evaluate", {
         {"expression", expression},
-        {"returnByValue", returnByValue == "true"}
+        {"returnByValue", returnByValue == "true"},
+        {"awaitPromise", awaitPromise}
     }, timeoutMs);
 }
 
 std::string RuntimeDomain::EvalString(const std::string& js, int timeoutMs) {
-    auto r = Evaluate(js, "true", timeoutMs);
+    auto r = Evaluate(js, "true", timeoutMs, false);
+    return r.value("result", json::object()).value("value", std::string{});
+}
+
+std::string RuntimeDomain::EvalStringAsync(const std::string& js, int timeoutMs) {
+    auto r = Evaluate(js, "true", timeoutMs, true);
+    if (r.contains("exceptionDetails")) return std::string{};
     return r.value("result", json::object()).value("value", std::string{});
 }
 

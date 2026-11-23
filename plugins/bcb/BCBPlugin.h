@@ -83,6 +83,9 @@ private:
     // 从 bytes 数组写文件
     static bool WriteBinaryFile(const std::string& path,
                                 const std::string& content);
+    // 查询版专用：从 el-table 提取「表头+数据」组成规范 JSON
+    // （el-table 的 header table 与 body table 分离，通用 DumpTablesJson 会错位）
+    std::string DumpQueryTableJson();
 
     // 解析交易流水表格（DOM 方式 fallback）
     std::string ScrapeTableJson();
@@ -166,12 +169,41 @@ private:
     // 点掉 Element UI 提示弹窗的「确定」按钮（返回 true = 已点）
     // 只处理 .el-message-box/.el-dialog；证书弹窗 #xtxAlert 的「确定」会下载 exe，不在此处理
     bool ClickPopupOk();
+    // 检测顶象降级后的「文字点选验证码」（请依次点击 XX 的汉字）。
+    // 这种不是滑块，RPA 无法自动识别，必须鸣笛转人工按顺序点字。
+    // 返回 true = 页面当前是点选验证码。
+    bool DetectClickWordCaptcha();
+    // 鸣笛呼叫人工处理点选验证码：不碰 HID、不 reload（刷掉验证码人工就没法点），
+    // 只轮询页面直到离开 /login 或超时。返回空串=人工完成登录；否则失败原因。
+    std::string WaitHumanClickCaptcha();
+    // 自动点选汉字验证码：抓验证码背景图 → 超级鹰 9800 拿到每个汉字坐标 →
+    // 从页面提示解析目标字序列 → 按序用 HID 鼠标点击，再点「确定/验证」并等通过。
+    // 返回空串=通过；否则失败原因（调用方再转人工）。
+    std::string AutoClickWordCaptcha(HidMouse& m);
     // 容错版 EvalStr：页面忙/加载中导致的 CDP 超时只返回空串，不抛异常中断整个 run
     std::string EvalStrQ(const std::string& js, int timeoutMs = 10000);
+    // 异步版 EvalStr：JS 返回 Promise（用于 crossOrigin 重新加载图片并转 dataURL）
+    std::string EvalStrAsync(const std::string& js, int timeoutMs = 10000);
     // 关掉北京银行「网银证书运行环境已升级」弹窗（#xtxAlert）。
     // 页面逻辑：sessionStorage.certDownload 为真即不再弹；已弹出则直接移除 DOM。
     // 返回移除的弹窗个数（0 = 本来就没弹）。
     int DismissCertPopup();
+
+    // ---- 查询版业务取数（复用演示版页面，区别仅在 origin 与日期设置）----
+    // 当前配置是否为查询版（loginUrl 带 version=query）
+    bool IsQueryVersion();
+    // 从 cfg_.loginUrl 提取 origin（scheme://host[:port]），供 GotoRoute 用
+    std::string BaseOrigin();
+    // 设置 Element UI 日期 range 组件（开始/结束日期），begin/end 为 YYYYMMDD
+    // 查询版真实数据必须设置为 YYYYMMDD 数组，否则接口报「日期错误」
+    bool SetQueryDateRange(const std::string& begin, const std::string& end);
+    // 查询版四类数据统一入口：导航->设日期->确定->抓表->下载->落盘
+    // 返回下载文件路径列表；dataTag 用于 data.json 文件名
+    std::vector<std::string> DoQueryExport(const std::string& route,
+                                           const std::string& begin,
+                                           const std::string& end,
+                                           const std::string& dataTag,
+                                           bool receipt = false);
 
 private:
     plugin::BankConfig                    cfg_;
