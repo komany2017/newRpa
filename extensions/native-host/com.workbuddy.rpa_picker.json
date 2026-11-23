@@ -1,0 +1,10 @@
+{
+  "name": "com.workbuddy.rpa_picker",
+  "description": "RPA element picker native host (C++ CDP bridge)",
+  "path": "E:\\NewRpa-Next\\extensions\\native-host\\rpa_native_host.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://gdkdmnankeaaokcjhpbdhckdfbibgedh/",
+    "chrome-extension://gmebcdcplebgjekbmfjakmiilclmenmf/"
+  ]
+}

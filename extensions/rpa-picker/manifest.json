@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "RPA 元素选择器",
+  "version": "1.0.0",
+  "description": "在页面上拾取元素，生成稳定选择器，并通过 Native Messaging 桥接到本机 C++ CDP 引擎回放执行。",
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "tabs",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "RPA 元素选择器"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["selector.js", "content.js"],
+      "css": ["picker.css"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}

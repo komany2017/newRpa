@@ -1,0 +1,83 @@
+* { box-sizing: border-box; }
+body {
+  width: 400px;
+  margin: 0;
+  padding: 0 0 12px;
+  background: #f7f8fa;
+  color: #1f2329;
+  font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+header {
+  padding: 12px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e5e6eb;
+}
+h1 { margin: 0; font-size: 15px; font-weight: 600; }
+.sub { color: #86909c; font-size: 11px; }
+section {
+  margin: 10px 12px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+}
+h2 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: #4e5969; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; min-width: 0; }
+button, select, input {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #c9cdd4;
+  border-radius: 5px;
+  background: #fff;
+  color: #1f2329;
+  font: inherit;
+  cursor: pointer;
+}
+input, select { cursor: text; }
+select { cursor: pointer; }
+button:hover { border-color: #1677ff; color: #1677ff; }
+button.primary { background: #1677ff; border-color: #1677ff; color: #fff; }
+button.primary:hover { background: #0958d9; color: #fff; }
+button.wide { width: 100%; margin-top: 8px; }
+label { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: #4e5969; }
+label input { flex: 1; }
+.hint { margin: 8px 0 0; color: #86909c; font-size: 11px; }
+.status {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #f2f3f5;
+  color: #4e5969;
+  word-break: break-all;
+}
+.status.ok { background: #e8ffea; color: #00a870; }
+.status.err { background: #ffece8; color: #cb2634; }
+.info { color: #4e5969; font-size: 12px; word-break: break-all; }
+#diagInfo { white-space: pre-wrap; max-height: 96px; overflow-y: auto; line-height: 1.6; }
+.candidates { list-style: none; margin: 8px 0 0; padding: 0; max-height: 160px; overflow-y: auto; }
+.candidates li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 6px;
+  margin-bottom: 4px;
+  background: #f7f8fa;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.candidates li:hover { background: #e8f3ff; }
+.candidates .score { color: #1677ff; font-weight: 600; min-width: 24px; }
+.candidates code { font-size: 11px; word-break: break-all; color: #1f2329; }
+.result {
+  margin: 8px 0 0;
+  padding: 8px;
+  max-height: 140px;
+  overflow: auto;
+  background: #f7f8fa;
+  border-radius: 5px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

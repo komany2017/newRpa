@@ -1,0 +1,51 @@
+#__rpa_picker_root__ {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+#__rpa_picker_root__ .rpa-box {
+  position: absolute;
+  display: none;
+  border: 2px solid #ff4d4f;
+  background: rgba(255, 77, 79, 0.12);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7) inset;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+#__rpa_picker_root__ .rpa-label {
+  position: absolute;
+  display: none;
+  max-width: 420px;
+  padding: 3px 8px;
+  background: #ff4d4f;
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 3px;
+}
+
+#__rpa_picker_root__ .rpa-toast {
+  position: absolute;
+  display: none;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 9px 16px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 18px;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  white-space: nowrap;
+}
+
+#__rpa_picker_root__ .rpa-toast.rpa-ok { background: #1677ff; }
+#__rpa_picker_root__ .rpa-toast.rpa-err { background: #cf1322; }

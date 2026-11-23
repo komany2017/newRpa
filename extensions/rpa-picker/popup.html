@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RPA 元素选择器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>RPA 元素选择器</h1>
+    <span class="sub">MV3 → Native Messaging → C++ CDP</span>
+  </header>
+
+  <div id="hostStatus" class="status">正在检测本机引擎…</div>
+
+  <section>
+    <div class="row">
+      <button id="btnStart" class="primary">开始拾取</button>
+      <button id="btnStop">停止</button>
+    </div>
+    <p class="hint">移动鼠标高亮元素，单击确认，Esc 退出。支持 iframe 与开放 Shadow DOM。</p>
+  </section>
+
+  <section>
+    <h2>最近拾取</h2>
+    <div id="targetInfo" class="info">尚未拾取元素</div>
+    <ul id="candidates" class="candidates"></ul>
+    <button id="btnCopy" class="wide">复制 descriptor JSON</button>
+  </section>
+
+  <section>
+    <h2>桥接诊断</h2>
+    <div id="diagInfo" class="info">尚未记录桥接事件</div>
+    <div class="row">
+      <button id="btnResend">重新同步</button>
+      <button id="btnCopyDiag">复制诊断信息</button>
+    </div>
+    <p class="hint">拾取成功但桥接失败时，按提示注册/启动后点「重新同步」，无需重新拾取元素。</p>
+  </section>
+
+  <section>
+    <h2>回放 / 执行</h2>
+    <div class="row">
+      <select id="actionType">
+        <option value="click">click</option>
+        <option value="input">input</option>
+        <option value="getText">getText</option>
+        <option value="getAttribute">getAttribute</option>
+        <option value="scroll">scroll</option>
+      </select>
+      <input id="actionValue" type="text" placeholder="输入值 / 属性名">
+    </div>
+    <div class="row">
+      <button id="btnReplay">回放定位</button>
+      <button id="btnExecute" class="primary">执行动作</button>
+    </div>
+    <pre id="result" class="result">结果将在这里显示</pre>
+  </section>
+
+  <section>
+    <h2>本机引擎</h2>
+    <label>CDP 端口 <input id="cdpPort" type="number" min="1" max="65535" value="9222"></label>
+    <label>页面匹配 <input id="targetMatch" type="text" placeholder="URL / 标题关键字，可空"></label>
+    <div class="row">
+      <button id="btnSave">保存配置</button>
+      <button id="btnPing">测试连接</button>
+    </div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>
