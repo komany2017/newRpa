@@ -19,6 +19,55 @@
 namespace newrpa {
 namespace arch {
 
+// ----------------------------------------------------------------------------
+// 等待 / 重试策略（P7）
+// 默认值来自 BCB 实测：轮询 500ms、下载等 20s、落盘后再观察 1.5s。
+// ----------------------------------------------------------------------------
+struct WaitPolicy {
+    int intervalMs = 500;   // 轮询间隔
+    int timeoutMs  = 20000; // 总超时
+    int settleMs   = 1500;  // 命中后继续观察，收集同批第二个文件
+};
+
+class Deadline {
+public:
+    explicit Deadline(int timeoutMs)
+        : deadline_(std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeoutMs)) {}
+
+    bool Expired() const {
+        return std::chrono::steady_clock::now() >= deadline_;
+    }
+
+    void Sleep(int ms) const {
+        if (ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
+
+private:
+    std::chrono::steady_clock::time_point deadline_;
+};
+
+struct RetryPolicy {
+    int attempts = 2;  // 总尝试次数（首次 + 重试）
+    int delayMs  = 0;  // 每次重试前的等待；下载场景为 0
+
+    // fn 接收 1-based attempt 序号，返回 Result<T>；仅 retryable 错误重试
+    template <class F>
+    auto Run(F&& fn) -> decltype(fn(1)) {
+        using R = decltype(fn(1));
+        int total = attempts > 0 ? attempts : 1;
+        for (int i = 1; i <= total; ++i) {
+            R r = fn(i);
+            if (r.ok()) return r;
+            if (!r.error().retryable || i == total) return r;
+            if (delayMs > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+        return R{};
+    }
+};
+
 struct IWorkflowStep {
     virtual ~IWorkflowStep() = default;
     virtual std::string name() const = 0;

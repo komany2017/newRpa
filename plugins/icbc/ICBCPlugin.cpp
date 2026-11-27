@@ -63,7 +63,7 @@ void ICBCPlugin::SetConfig(const plugin::BankConfig& cfg) {
 }
 
 void ICBCPlugin::Close() {
-    loggedIn_ = false;
+    loggedIn_.MarkLoggedOut();
     // session_ 是 shared_ptr，由外部 ChromeBrowser 持有，不用自己关
 }
 
@@ -169,7 +169,7 @@ std::string ICBCPlugin::HandleLoginPrompts() {
 
     // 如果 URL 包含 main.html / index_main 之类，说明登录成功
     if (WaitUrlContains("main", 5000) || WaitUrlContains("index_", 5000)) {
-        loggedIn_ = true;
+        loggedIn_.MarkLoggedIn();
         return "ok";
     }
 
@@ -189,7 +189,7 @@ std::string ICBCPlugin::HandleLoginPrompts() {
 
 std::string ICBCPlugin::LoginImpl() {
     if (!session_ || !browser_) return "error: session not ready";
-    if (loggedIn_) return "already logged in";
+    if (loggedIn_.IsLoggedIn()) return "already logged in";
 
     spdlog::info("[ICBC] Navigating to {}", cfg_.loginUrl);
 
@@ -257,8 +257,8 @@ std::string ICBCPlugin::LoginImpl() {
 // ----------------------------------------------------------------------------
 
 std::vector<std::map<std::string, std::string>> ICBCPlugin::GetCurBalImpl() {
-    if (!loggedIn_) { LoginImpl(); }
-    if (!loggedIn_) return {};
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) return {};
 
     // 工行余额查询页面 URL 模式（根据旧项目 IBANK 里的 curbalUrl）
     // 实际 URL 要从页面菜单里找，或用菜单导航
@@ -338,7 +338,7 @@ std::vector<std::map<std::string, std::string>> ICBCPlugin::ParseCurBal() {
 // ----------------------------------------------------------------------------
 
 std::vector<plugin::Transaction> ICBCPlugin::GetCurTranImpl() {
-    if (!loggedIn_) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
     // 工行当日交易页面，从菜单导航
     // 实际 URL 取决于工行版本号，先导航到 menu tree
     return GetHisTranImpl({util::TodayStr(), util::TodayStr()});
@@ -347,8 +347,8 @@ std::vector<plugin::Transaction> ICBCPlugin::GetCurTranImpl() {
 std::vector<plugin::Transaction> ICBCPlugin::GetHisTranImpl(
     const plugin::DateRange& range) {
 
-    if (!loggedIn_) { LoginImpl(); }
-    if (!loggedIn_) return {};
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) return {};
 
     // 核心：在工行页面里找"交易明细查询"入口 → 填时间 → 查 → 抓表格
     // 每个版本的菜单名/元素 id 都不同，所以用 Runtime.evaluate 做表格提取
@@ -437,7 +437,7 @@ std::vector<plugin::Transaction> ICBCPlugin::ParseTransTable() {
 
 std::vector<std::string> ICBCPlugin::DownBankSlipImpl(
     const plugin::DateRange& range) {
-    if (!loggedIn_) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
     // 回单下载需要工行的"电子回单"菜单，每个回单对应一个 PDF
     // 实际 URL 结构：/ebs/servlet/... 下载 PDF
     // 这里返回空实现，等接真实工行环境

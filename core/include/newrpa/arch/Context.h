@@ -8,6 +8,7 @@
 // header-only。仅依赖现有公开头文件，不改变 DLL ABI。
 // ============================================================================
 
+#include "newrpa/arch/StateStore.h"
 #include "newrpa/plugin/IBankPlugin.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/chrome/ChromeBrowser.h"
@@ -39,6 +40,8 @@ struct AppContext {
     std::string downloadDir = "downloads"; // 下游回单落盘根目录
     std::string stateDir    = "state";     // Cookie / 增量日期等持久化
     std::string configPath  = "config.json";
+    // P6：状态目录的单一入口，Cookie / 增量日期都由它生成路径
+    StateStore  state;
 
     // --- 运行参数 ---
     int retryCount  = 3;      // 可重试错误的默认次数
@@ -84,7 +87,8 @@ public:
         return *this;
     }
     AppContextBuilder& WithStateDir(std::string dir) {
-        ctx_.stateDir = std::move(dir);
+        ctx_.stateDir = dir;
+        ctx_.state.SetRoot(std::move(dir));
         return *this;
     }
     AppContextBuilder& WithConfigPath(std::string path) {
@@ -101,7 +105,51 @@ public:
         return *this;
     }
 
-    AppContext Build() const { return ctx_; }
+    AppContextBuilder& WithPlugin(plugin::IBankPlugin* p) {
+        ctx_.bankPlugin = p;
+        return *this;
+    }
+
+    AppContextBuilder& WithGlobalConfig(const util::GlobalConfig* g) {
+        ctx_.globalConfig = g;
+        return *this;
+    }
+
+    AppContextBuilder& WithAction(std::string action) {
+        ctx_.action = std::move(action);
+        return *this;
+    }
+
+    AppContextBuilder& WithRange(std::string begin, std::string end) {
+        ctx_.begin = std::move(begin);
+        ctx_.end = std::move(end);
+        return *this;
+    }
+
+    AppContextBuilder& WithPayment(std::string amount, std::string nums,
+                                   std::string paccno) {
+        ctx_.amount = std::move(amount);
+        ctx_.nums = std::move(nums);
+        ctx_.paccno = std::move(paccno);
+        return *this;
+    }
+
+    AppContextBuilder& WithNo(std::string no) {
+        ctx_.no = std::move(no);
+        return *this;
+    }
+
+    AppContextBuilder& WithReuseCookie(bool reuse) {
+        ctx_.reuseCookie = reuse;
+        return *this;
+    }
+
+    AppContext Build() const {
+        AppContext out = ctx_;
+        if (out.state.Root().empty())
+            out.state.SetRoot(out.stateDir);
+        return out;
+    }
 
 private:
     AppContext ctx_;

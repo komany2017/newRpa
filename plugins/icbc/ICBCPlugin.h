@@ -5,6 +5,7 @@
 // 基于 CDP + Chrome，替代旧项目里的 ICBCBANK + IE DOM 操控
 // ============================================================================
 
+#include "newrpa/arch/StateStore.h"
 #include "newrpa/plugin/IBankPlugin.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/cdp/CDPDomains.h"
@@ -132,7 +133,7 @@ private:
     std::unique_ptr<cdp::DomDomain>       dom_;
     std::unique_ptr<cdp::InputDomain>     input_;
 
-    bool loggedIn_ = false;
+    arch::LoginSessionState loggedIn_;
 };
 
 } // namespace icbc

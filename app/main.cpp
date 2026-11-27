@@ -21,6 +21,7 @@
 #include "newrpa/util/Config.h"
 #include "newrpa/util/LogSetup.h"
 #include "commands/BankCommands.h"
+#include "newrpa/arch/Context.h"
 #include "newrpa/util/StringUtils.h"
 
 #include <nlohmann/json.hpp>
@@ -372,23 +373,21 @@ int MainRun(const Args &args, const newrpa::util::GlobalConfig &cfg) {
     //    前置流程（配置查找 / 插件加载 / Chrome 启动 / CDP 连接）与原实现完全一致。
     spdlog::info("Running action: {}", args.action);
 
-    newrpa::arch::AppContext ctx;
-    ctx.action       = args.action;
-    ctx.begin        = args.begin;
-    ctx.end          = args.end;
-    ctx.amount       = args.amount;
-    ctx.nums         = args.nums;
-    ctx.paccno       = args.paccno;
-    ctx.no           = args.no;
-    ctx.reuseCookie  = args.reuseCookie;
-    ctx.configPath   = args.config;
-    ctx.bank         = *bankCfg;
-    ctx.bankPlugin   = plugin.get();
-    ctx.session      = session;
-    ctx.browser      = browser;
-    ctx.globalConfig = &cfg;
-    ctx.downloadDir  = fs::absolute("downloads").string();
-    ctx.stateDir     = fs::absolute("state").string();
+    newrpa::arch::AppContext ctx = newrpa::arch::AppContextBuilder()
+        .WithAction(args.action)
+        .WithRange(args.begin, args.end)
+        .WithPayment(args.amount, args.nums, args.paccno)
+        .WithNo(args.no)
+        .WithReuseCookie(args.reuseCookie)
+        .WithConfigPath(args.config)
+        .WithBank(*bankCfg)
+        .WithPlugin(plugin.get())
+        .WithSession(session)
+        .WithBrowser(browser)
+        .WithGlobalConfig(&cfg)
+        .WithDownloadDir(fs::absolute("downloads").string())
+        .WithStateDir(fs::absolute("state").string())
+        .Build();
 
     auto bus = newrpa::app::MakeBankCommandBus();
     auto result = bus->Execute(args.action, ctx);

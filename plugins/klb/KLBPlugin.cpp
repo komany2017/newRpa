@@ -75,7 +75,7 @@ void KLBPlugin::SetSession(std::shared_ptr<cdp::CDPSession> s,
 
 void KLBPlugin::SetConfig(const plugin::BankConfig& cfg) { cfg_ = cfg; }
 
-void KLBPlugin::Close() { loggedIn_ = false; }
+void KLBPlugin::Close() { loggedIn_.MarkLoggedOut(); }
 
 // ----------------------------------------------------------------------------
 // helper
@@ -332,7 +332,7 @@ bool KLBPlugin::WaitLoginForm(int timeoutMs) {
 
 std::string KLBPlugin::LoginImpl() {
     if (!session_ || !browser_) return "error: session not ready";
-    if (loggedIn_) return "already logged in";
+    if (loggedIn_.IsLoggedIn()) return "already logged in";
 
     // 已经连续失败 2 次（密码错误等）→ 不再重试，防止反复输错锁号
     if (loginFailCount_ >= 2) {
@@ -352,7 +352,7 @@ std::string KLBPlugin::LoginImpl() {
     // 或任一业务页），未登录时顶层文档就是登录表单（无 iframepage）
     if (EvalBool("!!document.getElementById('iframepage')")) {
         spdlog::info("[KLB] Already logged in (iframepage exists)");
-        loggedIn_ = true;
+        loggedIn_.MarkLoggedIn();
         return "already logged in";
     }
 
@@ -531,7 +531,7 @@ std::string KLBPlugin::LoginImpl() {
 
     std::string user = EvalStr("var e=document.getElementById('UserName'); e?e.value:''");
     spdlog::info("[KLB] LOGIN_OK user={}", user);
-    loggedIn_ = true;
+    loggedIn_.MarkLoggedIn();
     return "ok";
 }
 
@@ -541,7 +541,7 @@ std::string KLBPlugin::LoginImpl() {
 
 std::vector<std::map<std::string, std::string>> KLBPlugin::GetCurBalImpl() {
     std::vector<std::map<std::string, std::string>> rows;
-    if (!loggedIn_) {
+    if (!loggedIn_.IsLoggedIn()) {
         std::string r = LoginImpl();
         if (r != "ok" && r != "already logged in") return rows;
     }

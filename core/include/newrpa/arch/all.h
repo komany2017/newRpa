@@ -6,6 +6,7 @@
 // ============================================================================
 
 #include "newrpa/arch/Result.h"
+#include "newrpa/arch/StateStore.h"
 #include "newrpa/arch/Context.h"
 #include "newrpa/arch/Command.h"
 #include "newrpa/arch/Workflow.h"

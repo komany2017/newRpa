@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include "BCBPlugin.h"
+#include "newrpa/arch/Workflow.h"
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/ocr/ChaojiyingOcr.h"
 #include "newrpa/io/ExcelWriter.h"
@@ -176,7 +177,7 @@ void BCBPlugin::SetConfig(const plugin::BankConfig& cfg) {
 }
 
 void BCBPlugin::Close() {
-    loggedIn_ = false;
+    loggedIn_.MarkLoggedOut();
     UnpinBcbChromeTopmost();
     if (session_ && jsDialogEvHandle_) {
         session_->OffEvent("Page.javascriptDialogOpening", jsDialogEvHandle_);
@@ -767,21 +768,28 @@ std::vector<std::string> BCBPlugin::DoQueryExportPerRow(const std::string& route
     }
 
     // 2) 一行一行：只勾这一行 → 生成 → 下载（失败重试 1 次）
+    //    P7：重试与等待收归 RetryPolicy / WaitPolicy，参数来自 AppContext。
+    arch::WaitPolicy wait;
+    wait.timeoutMs = 20000;
+    arch::RetryPolicy retry;
+    retry.attempts = 2;
+    retry.delayMs = 0;
     for (int k = 0; k < n; ++k) {
         char seq[16];
         std::snprintf(seq, sizeof(seq), "%02d", k + 1);
-        std::vector<std::string> got;
-        for (int attempt = 1; attempt <= 2 && got.empty(); ++attempt) {
+        auto r = retry.Run([&](int attempt) -> arch::Result<std::vector<std::string>> {
             if (attempt > 1)
                 spdlog::warn("[BCB] 第 {}/{} 行第 1 次未取得文件，重试", k + 1, n);
             std::string selErr = SelectReceiptRow(k);
             if (!selErr.empty()) {
                 spdlog::warn("[BCB] 第 {}/{} 行勾选失败({})，跳过", k + 1, n, selErr);
-                break;
+                return arch::Result<std::vector<std::string>>::Fail(
+                    "slip.select_failed", selErr);
             }
             if (!GenerateReceiptForSelection()) {
                 spdlog::warn("[BCB] 第 {}/{} 行生成回单失败，跳过", k + 1, n);
-                break;
+                return arch::Result<std::vector<std::string>>::Fail(
+                    "slip.generate_failed", "generate failed");
             }
             // 快照当前下载目录（SnapshotDownloadDir 定义在本函数之后，这里内联）
             std::vector<std::string> before;
@@ -793,14 +801,19 @@ std::vector<std::string> BCBPlugin::DoQueryExportPerRow(const std::string& route
                         before.push_back(it->path().filename().string());
             }
             ClickDownloadWithConfirm();
-            got = WaitForNewFiles(before, dataTag + "_" + std::string(seq), 20000);
-            if (got.empty())
+            auto got = WaitForNewFiles(before, dataTag + "_" + std::string(seq),
+                                       wait.timeoutMs);
+            if (got.empty()) {
                 LogPageMessages();
-        }
-        if (got.empty())
+                return arch::Result<std::vector<std::string>>::Fail(
+                    arch::Error::Retryable("slip.no_file", "no download captured"));
+            }
+            return arch::Result<std::vector<std::string>>::Ok(std::move(got));
+        });
+        if (!r.ok())
             spdlog::warn("[BCB] 第 {}/{} 行未捕获到下载文件", k + 1, n);
         else
-            saved.insert(saved.end(), got.begin(), got.end());
+            saved.insert(saved.end(), r.value().begin(), r.value().end());
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
@@ -902,10 +915,11 @@ std::vector<std::string> BCBPlugin::WaitForNewFiles(
     std::vector<std::string> saved;
     std::set<std::string> known(before.begin(), before.end());
     std::string dir = DownloadDir();
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    arch::WaitPolicy policy;
+    policy.timeoutMs = timeoutMs;
+    arch::Deadline deadline(policy.timeoutMs);
+    while (!deadline.Expired()) {
+        deadline.Sleep(policy.intervalMs);
         std::error_code ec;
         for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
             if (ec) break;
@@ -930,7 +944,7 @@ std::vector<std::string> BCBPlugin::WaitForNewFiles(
         }
         if (!saved.empty()) {
             // 再观察 1.5 秒，收集同批第二个文件（如下载两次）
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            deadline.Sleep(policy.settleMs);
         }
     }
     if (saved.empty()) spdlog::warn("[BCB] 未捕获到原生下载文件");
@@ -1035,38 +1049,27 @@ std::string BCBPlugin::SelValue(int index) {
     return EvalStr(js);
 }
 
+// 三个状态函数保持 static（签名未变），用文件内单例统一路径与读写实现
+static arch::StateStore& BcbStateStore() {
+    static arch::StateStore store(fs::absolute("state"));
+    return store;
+}
+
 std::string BCBPlugin::StateFilePath() {
-    return (fs::absolute("state") / "bcb_histran_state.json").string();
+    return BcbStateStore().HisTranFile("bcb").string();
 }
 
 std::string BCBPlugin::LoadLastHisEnd() {
-    fs::path p = StateFilePath();
-    std::ifstream f(p);
-    if (!f) return "";
-    try {
-        nlohmann::json j; f >> j;
-        return j.value("last_success_end", "");
-    } catch (...) { return ""; }
+    return BcbStateStore().LoadLastHisEnd("bcb");
 }
 
 bool BCBPlugin::SaveLastHisEnd(const std::string& endYmd) {
-    try {
-        fs::path p = StateFilePath();
-        fs::create_directories(p.parent_path());
-        nlohmann::json j;
-        std::ifstream f(p);
-        if (f) { try { f >> j; } catch (...) { j = nlohmann::json::object(); } }
-        else j = nlohmann::json::object();
-        j["last_success_end"] = endYmd;
-        j["updated_at"] = util::FormatTime(std::time(nullptr));
-        std::ofstream o(p, std::ios::trunc);
-        o << j.dump(2);
-        spdlog::info("[BCB] Saved histran state: last_success_end={}", endYmd);
-        return true;
-    } catch (const std::exception& e) {
-        spdlog::warn("[BCB] Save state failed: {}", e.what());
+    if (!BcbStateStore().SaveLastHisEnd("bcb", endYmd)) {
+        spdlog::warn("[BCB] Save state failed: {}", BcbStateStore().LastError());
         return false;
     }
+    spdlog::info("[BCB] Saved histran state: last_success_end={}", endYmd);
+    return true;
 }
 
 std::string BCBPlugin::HalfYearAgoYmd() {
@@ -1096,8 +1099,8 @@ static std::vector<std::string> SnapshotDownloadDir(const std::string& dir) {
 }
 
 std::string BCBPlugin::RunAllAccountsImpl() {
-    if (!loggedIn_) LoginImpl();
-    if (!loggedIn_) return "login-failed";
+    if (!loggedIn_.IsLoggedIn()) LoginImpl();
+    if (!loggedIn_.IsLoggedIn()) return "login-failed";
 
     EnableNativeDownloads();
     int okFiles = 0;
@@ -1495,7 +1498,7 @@ std::string BCBPlugin::ScrapeTableJson() {
 // ----------------------------------------------------------------------------
 std::string BCBPlugin::LoginImpl() {
     if (!session_ || !browser_) return "error: session not ready";
-    if (loggedIn_) return "already logged in";
+    if (loggedIn_.IsLoggedIn()) return "already logged in";
 
     std::string url = cfg_.loginUrl.empty()
         ? "https://cbank.bankofbeijing.com.cn:9081/login?redirect=%2F"
@@ -1707,7 +1710,7 @@ std::string BCBPlugin::LoginImpl() {
     spdlog::info("[BCB] After login URL: {}", afterUrl);
 
     if (afterUrl.find("/login") == std::string::npos) {
-        loggedIn_ = true;
+        loggedIn_.MarkLoggedIn();
         spdlog::info("[BCB] Login OK");
         return "ok";
     }
@@ -1747,8 +1750,8 @@ std::string BCBPlugin::LoginImpl() {
 // GetCurBal — 当日余额查询（下载方式优先）
 // ----------------------------------------------------------------------------
 std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBalImpl() {
-    if (!loggedIn_) { LoginImpl(); }
-    if (!loggedIn_) return {};
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) return {};
 
     std::string today = util::TodayStr();
     std::vector<std::string> files;
@@ -1784,7 +1787,7 @@ std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBalImpl() {
 // GetCurTran — 当日交易（等同 GetHisTran(today, today)）
 // ----------------------------------------------------------------------------
 std::vector<plugin::Transaction> BCBPlugin::GetCurTranImpl() {
-    if (!loggedIn_) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
     return GetHisTranImpl({util::TodayStr(), util::TodayStr()});
 }
 
@@ -1794,8 +1797,8 @@ std::vector<plugin::Transaction> BCBPlugin::GetCurTranImpl() {
 std::vector<plugin::Transaction> BCBPlugin::GetHisTranImpl(
     const plugin::DateRange& range) {
 
-    if (!loggedIn_) { LoginImpl(); }
-    if (!loggedIn_) return {};
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) return {};
 
     // 当日与历史走同一明细页，用日期区间区分 tag
     bool isToday = (range.begin == range.end);
@@ -1863,8 +1866,8 @@ std::vector<std::string> BCBPlugin::DownBankSlipImpl(
     const plugin::DateRange& range) {
 
     std::vector<std::string> saved;
-    if (!loggedIn_) { LoginImpl(); }
-    if (!loggedIn_) return saved;
+    if (!loggedIn_.IsLoggedIn()) { LoginImpl(); }
+    if (!loggedIn_.IsLoggedIn()) return saved;
 
     // 演示版电子回单：勾选 → 生成回单 → 选方式一 → 确认 → 下载
     // 查询版：页面相同，需设置日期（YYYYMMDD）+ origin 不带端口
@@ -2517,7 +2520,7 @@ int BCBPlugin::DismissCertPopup() {
 
 std::string BCBPlugin::LoginQuery() {
     if (!session_ || !browser_) return "error: session not ready";
-    if (loggedIn_) return "already logged in";
+    if (loggedIn_.IsLoggedIn()) return "already logged in";
 
     const std::string kQueryUrl =
         "https://cbank.bankofbeijing.com.cn/login?redirect=%2F&version=query";
@@ -2668,7 +2671,7 @@ std::string BCBPlugin::LoginQuery() {
             }
         }
         if (left) {
-            loggedIn_ = true;
+            loggedIn_.MarkLoggedIn();
             spdlog::info("[BCB] 查询版登录成功: {}", EvalStr("location.href"));
             return "ok";
         }
@@ -2699,7 +2702,7 @@ std::string BCBPlugin::LoginQuery() {
     if (!FillQueryAccountPwd()) return "error: refill-failed";
     std::string man = ManualTakeover();
     if (man.empty()) {
-        loggedIn_ = true;
+        loggedIn_.MarkLoggedIn();
         return "ok";
     }
     if (man.rfind("need-manual", 0) == 0) {

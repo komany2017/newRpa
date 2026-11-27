@@ -18,6 +18,7 @@
 //   - 回单下载      URMReceiptQryPre.do （URMPreviewReceipt.do 直出 PDF）
 // ============================================================================
 
+#include "newrpa/arch/StateStore.h"
 #include "newrpa/plugin/IBankPlugin.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/cdp/CDPDomains.h"
@@ -164,7 +165,7 @@ private:
     std::unique_ptr<cdp::RuntimeDomain>    rt_;
     std::unique_ptr<cdp::InputDomain>      input_;
 
-    bool loggedIn_ = false;
+    arch::LoginSessionState loggedIn_;
 
     // 登录失败计数：提交后没进业务页（密码错误等）就 +1，
     // 连续 2 次后 Login() 直接拒绝重试，防止反复输错把号锁了

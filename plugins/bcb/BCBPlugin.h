@@ -9,6 +9,7 @@
 //           如果页面没导出按钮，fallback 到 DOM 抓表格
 // ============================================================================
 
+#include "newrpa/arch/StateStore.h"
 #include "newrpa/plugin/IBankPlugin.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/cdp/CDPDomains.h"
@@ -118,7 +119,7 @@ public:
     bool HostSaveCapture(const std::string& p, const std::string& b) override {
         return WriteBinaryFile(p, b);
     }
-    void HostMarkLoggedIn() override { loggedIn_ = true; }
+    void HostMarkLoggedIn() override { loggedIn_.MarkLoggedIn(); }
     std::vector<std::string>
     HostDoQueryExport(const std::string& route, const std::string& begin,
                       const std::string& end, const std::string& tag,
@@ -319,7 +320,7 @@ private:
     std::unique_ptr<cdp::InputDomain>     input_;
     std::unique_ptr<cdp::NetworkDomain>   net_;
 
-    bool loggedIn_ = false;
+    arch::LoginSessionState loggedIn_;
 
     // Page.javascriptDialogOpening 事件句柄（自动接管原生 alert/confirm）
     int  jsDialogEvHandle_ = 0;

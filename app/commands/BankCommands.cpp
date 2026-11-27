@@ -271,10 +271,10 @@ arch::ResultVoid HttpSessionCommand::execute(arch::AppContext& ctx) {
         return arch::MakeFail("http-session.no_context",
                               "http-session 需要插件与 CDP 会话");
 
-    fs::path stateDir = fs::absolute("state");
+    const fs::path stateDir = ctx.state.Root();
     std::error_code mkEc;
     fs::create_directories(stateDir, mkEc);
-    fs::path cookiePath = stateDir / ("cookies_" + ctx.bank.bankName + ".json");
+    fs::path cookiePath = ctx.state.CookieFile(ctx.bank.bankName);
 
     CookieJar jar;
     bool reused = false;
