@@ -6,13 +6,11 @@ add_library(bcb_plugin SHARED
     strategy/DingXiangSlider.cpp
     strategy/ClickWordCaptcha.cpp
     variant/BcbVariant.cpp
-    ../../core/src/singleUsbbox/HidKeyBoard.cpp
-    ../../core/src/singleUsbbox/hid_box.cpp
-    ../../core/src/singleUsbbox/HidMouse.cpp
 )
 
+# HID 键盘/鼠标已在 NewRpaCore 内编译（core/src/singleUsbbox + core/src/hid），
+# 插件只链接 NewRpaCore，不再各自复制源码编译。
 target_include_directories(bcb_plugin PRIVATE
-    ../../core/src/singleUsbbox
     ../../core/include/newrpa/singleUsbbox
 )
 

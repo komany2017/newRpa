@@ -23,7 +23,7 @@
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/cdp/CDPDomains.h"
 #include "newrpa/chrome/ChromeBrowser.h"
-#include <newrpa/singleUsbbox/HidKeyBoard.h>  // 硬件 HID 键盘盒子
+#include "newrpa/hid/HidInput.h"   // 公共硬件输入（键盘/鼠标盒子，NewRpaCore 内实现）
 
 #include <memory>
 #include <mutex>
@@ -122,16 +122,6 @@ private:
 
     // --- 登录专用 ---
     bool WaitLoginForm(int timeoutMs = 20000);
-    // 找 Chrome 主窗口并强前台（ALT 松锁 + AttachThreadInput）
-    bool FocusChromeWindow();
-
-    // 硬件键盘按 Tab（从操作员框 Tab 进密码控件，走正常焦点导航）
-    bool HardwareTab();
-
-    // 取消 Chrome 置顶（输完密码恢复普通层级）
-    void UnpinChromeTopmost();
-    // 硬件键盘直接输文本（HidKeyBoard，先 backspace 清空）
-    bool HardwareType(const std::string& text, int delayMs = 80);
     // 关掉可能弹着的 JS alert/confirm（密码错误提示），否则 CDP evaluate 被挂起
     void DismissJsDialog();
 
@@ -164,6 +154,9 @@ private:
     std::unique_ptr<cdp::PageDomain>       page_;
     std::unique_ptr<cdp::RuntimeDomain>    rt_;
     std::unique_ptr<cdp::InputDomain>      input_;
+
+    // 公共硬件输入（键盘/鼠标盒子）：聚焦安全控件 + 输密码
+    hid::HidInput                          hw_;
 
     arch::LoginSessionState loggedIn_;
 

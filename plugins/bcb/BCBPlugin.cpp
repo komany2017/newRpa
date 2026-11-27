@@ -23,6 +23,7 @@
 #define NOMINMAX
 #endif
 #include <newrpa/singleUsbbox/HidMouse.hpp>
+#include <newrpa/hid/HidInput.h>   // 公共窗口聚焦 / 硬件输入
 #include <newrpa/singleUsbbox/HidKeyBoard.h>
 #include <objidl.h>
 #include <gdiplus.h>
@@ -2031,110 +2032,23 @@ namespace newrpa {
 namespace bcb {
 namespace {
 
-// 找最大的可见 Chrome 窗口（与 KLB 同款）
-// 注意：VS Code 等 Electron 应用类名也是 Chrome_WidgetWin_1，
-// 必须按进程名过滤出真正的 chrome.exe，否则会把 VS Code 置顶最大化。
-HWND FindBcbChromeWindow() {
-    struct Ctx { HWND best; int len; } ctx{nullptr, 0};
-    EnumWindows([](HWND h, LPARAM lp)->BOOL {
-        auto* c = reinterpret_cast<Ctx*>(lp);
-        if (!IsWindowVisible(h)) return TRUE;
-        wchar_t cls[256] = {0};
-        GetClassNameW(h, cls, 256);
-        if (wcsstr(cls, L"Chrome_WidgetWin_1") == nullptr) return TRUE;
-        RECT r{};
-        if (!GetWindowRect(h, &r)) return TRUE;
-        if (r.right - r.left < 600 || r.bottom - r.top < 400) return TRUE;
-        // 进程必须是 chrome.exe
-        DWORD pid = 0;
-        GetWindowThreadProcessId(h, &pid);
-        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        bool isChrome = false;
-        if (hp) {
-            wchar_t exe[MAX_PATH] = {0};
-            DWORD len = MAX_PATH;
-            if (QueryFullProcessImageNameW(hp, 0, exe, &len) && len >= 10) {
-                const wchar_t* base = wcsrchr(exe, L'\\');
-                base = base ? base + 1 : exe;
-                isChrome = (_wcsicmp(base, L"chrome.exe") == 0);
-            }
-            CloseHandle(hp);
-        }
-        if (!isChrome) return TRUE;
-        int n = GetWindowTextLengthW(h);
-        if (n > c->len) { c->len = n; c->best = h; }
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&ctx));
-    return ctx.best;
-}
-
-// 兜底：把 VSCode(Code.exe) 的置顶状态摘掉。
-// VSCode 是 Electron，窗口类名同样是 Chrome_WidgetWin_1；旧逻辑曾误把它
-// 置顶，而 WS_EX_TOPMOST 是持久样式，不主动清除会一直盖住其它窗口，
-// 让用户以为「打开 VSCode 就置顶」，还会抢走调试时的焦点。
-void UnpinVsCodeTopmost() {
-    EnumWindows([](HWND h, LPARAM)->BOOL {
-        if (!IsWindowVisible(h)) return TRUE;
-        LONG ex = GetWindowLongW(h, GWL_EXSTYLE);
-        if (!(ex & WS_EX_TOPMOST)) return TRUE;
-        wchar_t cls[128] = {0};
-        GetClassNameW(h, cls, 128);
-        if (wcsstr(cls, L"Chrome_WidgetWin_1") == nullptr) return TRUE;
-        DWORD pid = 0;
-        GetWindowThreadProcessId(h, &pid);
-        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!hp) return TRUE;
-        wchar_t exe[MAX_PATH] = {0};
-        DWORD len = MAX_PATH;
-        BOOL ok = QueryFullProcessImageNameW(hp, 0, exe, &len);
-        CloseHandle(hp);
-        if (!ok) return TRUE;
-        const wchar_t* base = wcsrchr(exe, L'\\');
-        base = base ? base + 1 : exe;
-        if (_wcsicmp(base, L"Code.exe") != 0) return TRUE;
-        SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        return TRUE;
-    }, 0);
-}
-
-// 登录前把 Chrome 最大化 + 置顶 + 前置。
-// 置顶(HWND_TOPMOST)：硬件键盘/滑块期间不被别的窗口盖住；
-// 最大化(SW_MAXIMIZE)：页面元素位置稳定，滑块标定/点击坐标不因窗口大小漂移。
+// 窗口查找 / 置前 / 置顶 / 排除 VS Code 等同名 Electron 进程，
+// 统一由公共 newrpa::hid::HidInput 提供（core/src/hid/HidInput.cpp）。
+// 这里只保留与北京银行场景对应的两个薄封装：
+//   * maximize=true  —— 滑块标定要求窗口尺寸稳定，坐标不随窗口大小漂移
+//   * topmost=true   —— 硬件键盘/滑块期间不被别的窗口盖住
 bool FocusBcbChromeWindow() {
-    UnpinVsCodeTopmost();   // 先把可能被误置顶的 VSCode 摘下来
-    HWND h = FindBcbChromeWindow();
-    if (!h) return false;
-    // 先确保不是最小化状态，再最大化 + 置顶（即使已在前台也要执行）
-    if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
-    ShowWindow(h, SW_MAXIMIZE);
-    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (GetForegroundWindow() == h) return true;
-    keybd_event(VK_MENU, 0, 0, 0);
-    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-    DWORD fgTid = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-    DWORD myTid = GetCurrentThreadId();
-    bool attached = false;
-    if (fgTid && fgTid != myTid) attached = (AttachThreadInput(myTid, fgTid, TRUE) != 0);
-    BringWindowToTop(h);
-    SetForegroundWindow(h);
-    if (attached) AttachThreadInput(myTid, fgTid, FALSE);
-    Sleep(200);
-    return GetForegroundWindow() == h;
+    return newrpa::hid::HidInput::FocusChrome(/*maximize=*/true,
+                                              /*topmost=*/true);
 }
 
 
 } // namespace
 
 // 收尾：取消 Chrome 置顶（登录前置顶后必须恢复，否则一直压住 VSCode 等窗口）。
-// 放在匿名 namespace 之后，才能复用上面的 FindBcbChromeWindow / UnpinVsCodeTopmost。
-// 同时把误置顶的 VSCode 一并摘掉，保证异常路径下也不残留 TOPMOST。
+// 公共 HidInput 内部会同时摘掉误置顶的 VSCode，保证异常路径下也不残留 TOPMOST。
 void BCBPlugin::UnpinBcbChromeTopmost() {
-    HWND h = FindBcbChromeWindow();
-    if (h) SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    UnpinVsCodeTopmost();
+    newrpa::hid::HidInput::UnpinChromeTopmost();
 }
 
 // ----------------------------------------------------------------------------
@@ -2145,20 +2059,11 @@ bool BCBPlugin::HardwareType(const std::string& text, int delayMs) {
     std::wstring w(wl > 1 ? wl - 1 : 0, L'\0');
     if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &w[0], wl);
 
-    HWND h = FindBcbChromeWindow();
-    if (!h) { spdlog::error("[BCB] 没找到 Chrome 窗口"); return false; }
-    if (GetForegroundWindow() != h) {
-        ShowWindow(h, SW_RESTORE);
-        keybd_event(VK_MENU, 0, 0, 0);
-        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-        DWORD fgTid = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-        DWORD myTid = GetCurrentThreadId();
-        bool attached = false;
-        if (fgTid && fgTid != myTid) attached = (AttachThreadInput(myTid, fgTid, TRUE) != 0);
-        BringWindowToTop(h);
-        SetForegroundWindow(h);
-        if (attached) AttachThreadInput(myTid, fgTid, FALSE);
-        Sleep(200);
+    // 硬件键盘字符进前台窗口：先确保 Chrome 在前后台
+    if (!newrpa::hid::HidInput::FocusChrome(/*maximize=*/false,
+                                            /*topmost=*/true)) {
+        spdlog::error("[BCB] 没找到 Chrome 窗口或置前失败");
+        return false;
     }
 
     HidKeyBoard kb;

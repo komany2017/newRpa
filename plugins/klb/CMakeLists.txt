@@ -2,14 +2,12 @@
 
 add_library(klb_plugin SHARED
     KLBPlugin.cpp
-    ../../core/src/singleUsbbox/HidKeyBoard.cpp
-    ../../core/src/singleUsbbox/hid_box.cpp
 )
 
-target_include_directories(klb_plugin PRIVATE
-    ../../core/src/singleUsbbox
-    ../../core/include/newrpa/singleUsbbox   # HidKeyBoard.h / hid_box.hpp / ime_guard.hpp 已迁到此处
-)
+# HID 键盘/鼠标已在 NewRpaCore 内编译（core/src/singleUsbbox + core/src/hid），
+# 插件只链接 NewRpaCore，不再各自复制源码编译，也不需要额外 include 目录。
+# （若某插件要直接用 HidKeyBoard/HidMouse 类，再自行加
+#   ../../core/include/newrpa/singleUsbbox 即可。）
 
 set_target_properties(klb_plugin PROPERTIES
     OUTPUT_NAME "klb"

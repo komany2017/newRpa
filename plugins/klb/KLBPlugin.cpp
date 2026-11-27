@@ -12,8 +12,6 @@
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
-#include <windows.h>
-
 #include <chrono>
 #include <thread>
 #include <fstream>
@@ -22,7 +20,6 @@
 #include <cctype>
 #include <ctime>
 #include <algorithm>
-#include <random>
 
 using namespace newrpa;
 namespace fs = std::filesystem;
@@ -57,6 +54,7 @@ void KLBPlugin::SetSession(std::shared_ptr<cdp::CDPSession> s,
                             std::shared_ptr<chrome::ChromeBrowser> b) {
     session_ = std::move(s);
     browser_ = std::move(b);
+    hw_.SetSession(session_.get());
     if (session_) {
         page_  = std::make_unique<cdp::PageDomain>(session_.get());
         rt_    = std::make_unique<cdp::RuntimeDomain>(session_.get());
@@ -75,7 +73,10 @@ void KLBPlugin::SetSession(std::shared_ptr<cdp::CDPSession> s,
 
 void KLBPlugin::SetConfig(const plugin::BankConfig& cfg) { cfg_ = cfg; }
 
-void KLBPlugin::Close() { loggedIn_.MarkLoggedOut(); }
+void KLBPlugin::Close() {
+    hw_.Close();
+    loggedIn_.MarkLoggedOut();
+}
 
 // ----------------------------------------------------------------------------
 // helper
@@ -141,139 +142,6 @@ std::map<std::string, std::string> KLBPlugin::ParseBean(const std::string& s) {
     cur += rest;
     flush(cur);
     return out;
-}
-
-// ----------------------------------------------------------------------------
-// 硬件键盘（HidKeyBoard 直接调用，不经外部工具）
-// ----------------------------------------------------------------------------
-
-namespace {
-
-struct FindCtx {
-    std::wstring clsKey;
-    HWND best = nullptr;
-    int  bestLen = 0;
-};
-
-BOOL CALLBACK EnumChromeProc(HWND h, LPARAM lp) {
-    auto* ctx = reinterpret_cast<FindCtx*>(lp);
-    if (!IsWindowVisible(h)) return TRUE;
-    wchar_t cls[256] = {0};
-    GetClassNameW(h, cls, 256);
-    if (std::wstring(cls).find(ctx->clsKey) == std::wstring::npos) return TRUE;
-    int n = GetWindowTextLengthW(h);
-    if (n <= 0) return TRUE;
-    RECT r{};
-    GetWindowRect(h, &r);
-    if ((r.right - r.left) < 600 || (r.bottom - r.top) < 400) return TRUE;
-    if (n > ctx->bestLen) { ctx->bestLen = n; ctx->best = h; }
-    return TRUE;
-}
-
-}  // namespace
-
-// 按类名找 Chrome 主窗口（复用 EnumChromeProc 的过滤逻辑）
-static HWND FindChromeWindow() {
-    FindCtx ctx{L"Chrome_WidgetWin_1", nullptr, 0};
-    EnumWindows(EnumChromeProc, reinterpret_cast<LPARAM>(&ctx));
-    return ctx.best;
-}
-
-bool KLBPlugin::FocusChromeWindow() {
-    HWND h = FindChromeWindow();
-    if (!h) {
-        spdlog::error("[KLB] Chrome window not found");
-        return false;
-    }
-    // 置顶：硬件键盘字符进的是前台窗口，输密码期间被别的窗口盖住就串了
-    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (GetForegroundWindow() == h) return true;
-    ShowWindow(h, SW_RESTORE);
-    // ALT 敲一下解除前台锁
-    keybd_event(VK_MENU, 0, 0, 0);
-    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-    DWORD fgTid = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-    DWORD myTid = GetCurrentThreadId();
-    bool attached = false;
-    if (fgTid && fgTid != myTid)
-        attached = (AttachThreadInput(myTid, fgTid, TRUE) != 0);
-    BringWindowToTop(h);
-    SetForegroundWindow(h);
-    if (attached) AttachThreadInput(myTid, fgTid, FALSE);
-    Sleep(200);
-    bool ok = (GetForegroundWindow() == h);
-    if (!ok) spdlog::warn("[KLB] Chrome foreground not set");
-    return ok;
-}
-
-// 输完取消置顶（恢复普通层级，不干扰用户后续操作）
-void KLBPlugin::UnpinChromeTopmost() {
-    HWND h = FindChromeWindow();
-    if (h) SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-}
-
-bool KLBPlugin::HardwareType(const std::string& text, int delayMs) {
-    if (!FocusChromeWindow()) return false;
-    HidKeyBoard kb;
-    kb.setImeIsolation(true);
-    kb.setKeyDelay(delayMs);
-    auto st = HidKeyBoard::detect();
-    spdlog::info("[KLB] HW keyboard: plugged={} usable={} detail={}",
-                 st.plugged, st.usable, st.detail);
-    if (!kb.open()) {
-        spdlog::error("[KLB] HidKeyBoard open failed: {}", kb.lastError());
-        return false;
-    }
-    kb.backspace(32);  // 清空，防残留
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    // 模拟人工输入：逐字发送，字间随机停顿，每隔 2~4 个字符还有一次
-    // "想一想"的长顿（200~600ms），避免匀速机关枪式的输入
-    // 注意：不能加 static —— lambda 捕获非自动存储期变量是未定义行为（C++20 起报错）
-    std::mt19937 rng{
-        static_cast<unsigned>(std::chrono::steady_clock::now()
-                              .time_since_epoch().count())};
-    auto rnd = [&rng](int lo, int hi) {
-        return lo + static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1));
-    };
-    int sinceLong = 0;
-    int nextLong = rnd(2, 4);
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (!kb.type(std::wstring(1, static_cast<wchar_t>(text[i])), delayMs)) {
-            spdlog::error("[KLB] HW type char {} failed: {}",
-                          static_cast<unsigned char>(text[i]), kb.lastError());
-            UnpinChromeTopmost();
-            return false;
-        }
-        // 字间停顿 40~160ms（叠加 HidKeyBoard 内部 jitter [delayMs/2, delayMs)）
-        std::this_thread::sleep_for(std::chrono::milliseconds(rnd(40, 160)));
-        ++sinceLong;
-        if (sinceLong >= nextLong && i + 1 < text.size()) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(rnd(200, 600)));
-            sinceLong = 0;
-            nextLong = rnd(2, 4);
-        }
-    }
-    spdlog::info("[KLB] HW type: ok=true chars={} (human pacing)", text.size());
-    UnpinChromeTopmost();
-    return true;
-}
-
-bool KLBPlugin::HardwareTab() {
-    if (!FocusChromeWindow()) return false;
-    HidKeyBoard kb;
-    kb.setImeIsolation(true);
-    kb.setKeyDelay(60);
-    if (!kb.open()) {
-        spdlog::error("[KLB] HidKeyBoard open failed: {}", kb.lastError());
-        return false;
-    }
-    bool ok = kb.pressKey(HidKeyBoard::KeyTab);
-    spdlog::info("[KLB] HW Tab: ok={} err={}", ok, kb.lastError());
-    UnpinChromeTopmost();
-    return ok;
 }
 
 // 关掉可能弹着的 JS alert/confirm（银行登录失败提示常见形态）。
@@ -368,35 +236,28 @@ std::string KLBPlugin::LoginImpl() {
     spdlog::info("[KLB] Login form ready");
 
     // --- 1. 填客户号 / 操作员号（普通输入框，CDP 直接赋值）---
-    std::string cif = cfg_.account.empty() ? "200009642" : cfg_.account;
-    std::string uid = cfg_.operatorId.empty() ? "ZL123" : cfg_.operatorId;
+    // 凭据只从配置读取；缺失时明确报错，不再使用历史硬编码默认值
+    if (cfg_.account.empty() || cfg_.operatorId.empty())
+        return "error: KLB account/operatorId not configured";
+    std::string cif = cfg_.account;
+    std::string uid = cfg_.operatorId;
     EvalStr("document.getElementById('CifNo').value='" + cif + "';"
             "document.getElementById('UserId').value='" + uid + "';");
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-    // --- 2. 聚焦密码控件：鼠标点操作员输入框 → 硬件键盘 Tab（走正常焦点
-    //     导航，比直接点 _safepass 可靠）；Tab 失败再回退直接点控件 ---
-    auto ClickBox = [this](const std::string& id) -> bool {
-        std::string boxJson = EvalStr(
-            "(function(){var e=document.getElementById('" + id + "');"
-            "if(!e) return '';var r=e.getBoundingClientRect();"
-            "return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});})()");
-        if (boxJson.empty()) return false;
-        try {
-            auto j = nlohmann::json::parse(boxJson);
-            input_->MouseClick(j.value("x", 0.0), j.value("y", 0.0));
-        } catch (...) { return false; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        std::string a = EvalStr(
-            "document.activeElement ? "
-            "(document.activeElement.id||document.activeElement.tagName) : 'none'");
-        spdlog::info("[KLB] click {} -> active={}", id, a);
-        return a == id;
-    };
-    auto ActiveId = [this]() {
-        return EvalStr("document.activeElement ? "
-                       "(document.activeElement.id||document.activeElement.tagName) : 'none'");
-    };
+    // --- 2 & 3. 聚焦密码控件 + 输密码（公共 HidInput 统一封装）---
+    // iProtect 控件 _safepass 的 tabindex=-1，Tab 焦点导航到不了，
+    // 只能按坐标点击控件中心；HidInput::FocusElement 负责点击 + JS focus 兜底。
+    if (cfg_.password.empty())
+        return "error: KLB password not configured";
+    std::string pwd = cfg_.password;
+
+    hw_.SetSession(session_.get());
+    spdlog::info("[KLB] HW box: {}", hw_.Probe().ToString());
+    if (!hw_.OpenKeyboard(0xC216, 0x0301, 80)) {
+        spdlog::error("[KLB] 硬件键盘打开失败: {}", hw_.LastError());
+        return "error: hardware keyboard unavailable";
+    }
 
     bool focused = false;
     // 两轮策略：第一轮 5 次点击都落空（Chrome 刚重启的竞态、控件遮罩未退等
@@ -413,53 +274,24 @@ std::string KLBPlugin::LoginImpl() {
                     "document.getElementById('UserId').value='" + uid + "';");
             std::this_thread::sleep_for(std::chrono::milliseconds(800));
         }
-        for (int attempt = 0; attempt < 5 && !focused; ++attempt) {
-            // 点操作员输入框
-            if (!ClickBox("UserId")) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;
-            }
-            // 硬件键盘 Tab → 密码控件
-            HardwareTab();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            std::string active = ActiveId();
-            spdlog::info("[KLB] after Tab: active={}", active);
-            if (active == "_safepass" || active == "safepass") { focused = true; break; }
-
-            // 回退：直接点 _safepass
-            ClickBox("_safepass");
-            active = ActiveId();
-            if (active == "_safepass" || active == "safepass") focused = true;
-        }
+        focused = hw_.FocusElement("#_safepass", 5);
     }
     if (!focused) {
-        spdlog::error("[KLB] safepass focus failed, active={}", ActiveId());
+        spdlog::error("[KLB] safepass focus failed, active={}",
+                      hw_.ActiveElement());
         return "error: safepass not focused";
     }
+    spdlog::info("[KLB] click _safepass -> active={}", hw_.ActiveElement());
 
-    // --- 3. 硬件键盘输密码（合成键盘被 iProtect 拒绝）---
-    std::string pwd = cfg_.password.empty() ? "jy852963" : cfg_.password;
-    // 验证-重试：控件星号数必须等于密码长度，不符就清空重输
-    std::string masked;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        // 输前焦点复查：不在线上就重新点（防 Tab/切换瞬间焦点漂移吃字符）
-        std::string a = ActiveId();
-        if (a != "_safepass" && a != "safepass") {
-            spdlog::warn("[KLB] focus drifted before typing ({}), re-click", a);
-            ClickBox("_safepass");
-        }
-        if (!HardwareType(pwd, 80)) return "error: hardware keyboard typing failed";
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        masked = EvalStr("document.getElementById('_safepass').innerText");
-        int stars = std::count(masked.begin(), masked.end(), '*');
-        spdlog::info("[KLB] masked stars={} expect={}", stars, pwd.size());
-        if (stars == static_cast<int>(pwd.size())) break;
-        if (attempt == 2) {
-            spdlog::error("[KLB] password length mismatch after retries: '{}'", masked);
-            return "error: password not entered (stars=" + std::to_string(stars) + ")";
-        }
+    // CDP 合成键盘常被 iProtect 拒绝 → TypeIntoFocused 内部先 CDP、
+    // 不足再回退硬件键盘，并以控件星号数校验实际输入长度
+    if (!hw_.TypeIntoFocused(pwd, "#_safepass")) {
+        spdlog::error("[KLB] password input failed: {}", hw_.LastError());
+        return "error: password not entered (stars=" +
+               std::to_string(hw_.MaskLength("#_safepass")) + ")";
     }
-    spdlog::info("[KLB] password entered (masked)");
+    spdlog::info("[KLB] password entered (masked={})",
+                 hw_.MaskLength("#_safepass"));
 
     // --- 4. 点登录 → doLogin() 自动取密文+MFM 提交 ---
     EvalBool("(function(){var b=document.getElementById('Button');"
