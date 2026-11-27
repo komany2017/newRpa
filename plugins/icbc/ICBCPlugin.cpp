@@ -187,7 +187,7 @@ std::string ICBCPlugin::HandleLoginPrompts() {
 // Login — 核心登录流程
 // ----------------------------------------------------------------------------
 
-std::string ICBCPlugin::Login() {
+std::string ICBCPlugin::LoginImpl() {
     if (!session_ || !browser_) return "error: session not ready";
     if (loggedIn_) return "already logged in";
 
@@ -256,8 +256,8 @@ std::string ICBCPlugin::Login() {
 // GetCurBal — 当日余额查询
 // ----------------------------------------------------------------------------
 
-std::vector<std::map<std::string, std::string>> ICBCPlugin::GetCurBal() {
-    if (!loggedIn_) { Login(); }
+std::vector<std::map<std::string, std::string>> ICBCPlugin::GetCurBalImpl() {
+    if (!loggedIn_) { LoginImpl(); }
     if (!loggedIn_) return {};
 
     // 工行余额查询页面 URL 模式（根据旧项目 IBANK 里的 curbalUrl）
@@ -337,17 +337,17 @@ std::vector<std::map<std::string, std::string>> ICBCPlugin::ParseCurBal() {
 // GetCurTran / GetHisTran — 流水查询
 // ----------------------------------------------------------------------------
 
-std::vector<plugin::Transaction> ICBCPlugin::GetCurTran() {
-    if (!loggedIn_) { Login(); }
+std::vector<plugin::Transaction> ICBCPlugin::GetCurTranImpl() {
+    if (!loggedIn_) { LoginImpl(); }
     // 工行当日交易页面，从菜单导航
     // 实际 URL 取决于工行版本号，先导航到 menu tree
-    return GetHisTran({util::TodayStr(), util::TodayStr()});
+    return GetHisTranImpl({util::TodayStr(), util::TodayStr()});
 }
 
-std::vector<plugin::Transaction> ICBCPlugin::GetHisTran(
+std::vector<plugin::Transaction> ICBCPlugin::GetHisTranImpl(
     const plugin::DateRange& range) {
 
-    if (!loggedIn_) { Login(); }
+    if (!loggedIn_) { LoginImpl(); }
     if (!loggedIn_) return {};
 
     // 核心：在工行页面里找"交易明细查询"入口 → 填时间 → 查 → 抓表格
@@ -435,9 +435,9 @@ std::vector<plugin::Transaction> ICBCPlugin::ParseTransTable() {
 // DownBankSlip — 回单下载
 // ----------------------------------------------------------------------------
 
-std::vector<std::string> ICBCPlugin::DownBankSlip(
+std::vector<std::string> ICBCPlugin::DownBankSlipImpl(
     const plugin::DateRange& range) {
-    if (!loggedIn_) { Login(); }
+    if (!loggedIn_) { LoginImpl(); }
     // 回单下载需要工行的"电子回单"菜单，每个回单对应一个 PDF
     // 实际 URL 结构：/ebs/servlet/... 下载 PDF
     // 这里返回空实现，等接真实工行环境
@@ -449,7 +449,7 @@ std::vector<std::string> ICBCPlugin::DownBankSlip(
 // Payment / Approval / Query — 付款/审批/查询
 // ----------------------------------------------------------------------------
 
-std::string ICBCPlugin::Payment(
+std::string ICBCPlugin::PaymentImpl(
     const std::string& amount, const std::string& nums,
     const std::string& paccno, const std::string& filename,
     const std::string& sn) {
@@ -457,12 +457,12 @@ std::string ICBCPlugin::Payment(
     return "stub";
 }
 
-std::string ICBCPlugin::Approval(const std::string& no) {
+std::string ICBCPlugin::ApprovalImpl(const std::string& no) {
     spdlog::warn("[ICBC] Approval stub");
     return "stub";
 }
 
-std::string ICBCPlugin::Query(const std::string& no) {
+std::string ICBCPlugin::QueryImpl(const std::string& no) {
     spdlog::warn("[ICBC] Query stub");
     return "stub";
 }

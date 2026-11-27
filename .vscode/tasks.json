@@ -105,7 +105,7 @@
             "command": "powershell",
             "args": [
                 "-NoProfile", "-Command",
-                "$dst='${workspaceFolder}/build-mingw/bin/plugins'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Get-ChildItem '${workspaceFolder}/build-mingw/bin/*.dll' | Where-Object { $_.Name -notlike '*NewRpaCore*' } | ForEach-Object { Copy-Item $_.FullName $dst -Force; Write-Host \"Copy $($_.Name) -> plugins/\" }"
+                "$dst='${workspaceFolder}/build-mingw/bin/plugins'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Get-ChildItem '${workspaceFolder}/build-mingw/bin/*.dll' | Where-Object { $_.Name -notlike '*NewRpaCore*' } | ForEach-Object { $df=Join-Path $dst $_.Name; if (-not (Test-Path $df)) { Copy-Item $_.FullName $df -Force; Write-Host \"Fill missing: $($_.Name) -> plugins/\" } else { Write-Host \"Skip $($_.Name): CMake already outputs to plugins/ - never overwrite a newer build\" } }"
             ],
             "problemMatcher": []
         },
@@ -169,7 +169,6 @@
             "label": "Debug BCB Query (prepare)",
             "dependsOrder": "sequence",
             "dependsOn": [
-                "Ensure Chrome CDP 9222",
                 "Kill stale newrpa",
                 "CMake: build (Debug)",
                 "Copy DLLs to plugins/"

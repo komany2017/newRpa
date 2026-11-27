@@ -2,6 +2,7 @@
 
 add_executable(newrpa
     main.cpp
+    commands/BankCommands.cpp
 )
 
 target_link_libraries(newrpa PRIVATE NewRpaCore winhttp)

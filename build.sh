@@ -147,8 +147,7 @@ cmake --build "$BUILD_CFG" "${BUILD_ARGS[@]}" || die "编译失败"
 # ---------------- 产物清单 ----------------
 echo
 echo "==================== 编译成功 ===================="
-for f in "$BIN_DIR/newrpa.exe" "$BIN_DIR/libNewRpaCore.dll" \
-         "$BIN_DIR/desbase64.exe" "$BIN_DIR/mouse_move.exe" \
+for f in "$BIN_DIR/newrpa.exe" \
          "$BIN_DIR/plugins/libbcb.dll" "$BIN_DIR/plugins/libicbc.dll" \
          "$BIN_DIR/plugins/libklb.dll"; do
   if [[ -f "$f" ]]; then

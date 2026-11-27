@@ -68,7 +68,8 @@ public:
 private:
     void RunLoop();                     // WebSocket++ 运行线程
     void OnMessage(const std::string&); // 收到一条 CDP 消息
-    json WaitForResponse(int id, int timeoutMs);
+    json WaitForResponse(int id, int timeoutMs, const std::string& method);
+    void FailAllPending(const std::string& reason);
 
     std::string wsUrl_;
     std::atomic<bool> connected_{false};
@@ -81,8 +82,9 @@ private:
     struct PendingResponse {
         std::condition_variable cv;
         std::mutex mtx;
-        json response;        // 收到的 result 或 error
-        bool received = false; // 是否收到了响应（成功或错误都算）
+        json response;          // 收到的 result 或 error
+        bool received = false;  // 是否收到了响应（成功或错误都算）
+        bool disconnected = false; // 会话断开，等待方应立即失败
     };
     std::unordered_map<int, std::shared_ptr<PendingResponse>> pendings_;
     std::mutex pendingsMutex_;

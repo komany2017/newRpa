@@ -54,7 +54,15 @@ bool CDPSession::Connect() {
             if (!ws_->sock.RecvMessage(msg, 3000)) {
                 if (!connected_.load()) break;
                 if (!ws_->recvRunning.load()) break;
-                // timeout 正常，循环继续
+                // 对端关闭 WebSocket 后，MinWS 自己的 connected_ 会先变 false。
+                // 这里必须同步 CDPSession 的状态并唤醒在途 Call，否则调用方只能等满超时。
+                if (!ws_->sock.IsConnected()) {
+                    spdlog::warn("[CDP] WebSocket closed by peer");
+                    connected_.store(false);
+                    FailAllPending("WebSocket closed by peer");
+                    break;
+                }
+                // 普通 recv 超时，继续等下一帧
                 continue;
             }
             std::string text(msg.data.begin(), msg.data.end());
@@ -79,11 +87,24 @@ bool CDPSession::Connect() {
 }
 
 void CDPSession::Disconnect() {
-    if (!connected_.load() && !running_.load()) return;
-    ws_->recvRunning.store(false);
     connected_.store(false);
-    ws_->sock.Close();
-    if (wsThread_.joinable()) wsThread_.join();
+    ws_->recvRunning.store(false);
+
+    // 唤醒所有在途同步调用，避免断连后还要等满 10s 超时。
+    FailAllPending("CDPSession disconnected");
+    {
+        // 与 Call/CallNoWait 的发送串行化，避免 Close 与 send 竞争同一个 socket。
+        std::lock_guard<std::mutex> lk(ws_->sendMtx);
+        ws_->sock.Close();
+    }
+
+    if (wsThread_.joinable()) {
+        // 正常路径下 Disconnect 由控制线程调用；若从接收线程重入，不能 join 自己。
+        if (wsThread_.get_id() == std::this_thread::get_id())
+            wsThread_.detach();
+        else
+            wsThread_.join();
+    }
     running_.store(false);
 }
 
@@ -93,11 +114,16 @@ json CDPSession::Call(const std::string& method,
                       const json& params,
                       int timeoutMs) {
     if (!connected_.load())
-        throw std::runtime_error("CDPSession not connected");
+        throw std::runtime_error("CDP session not connected (" + method + ")");
 
     int id = nextId_.fetch_add(1);
     json msg = {{"id", id}, {"method", method}};
     if (!params.is_null() && !params.empty()) msg["params"] = params;
+
+    auto removePending = [&]() {
+        std::lock_guard<std::mutex> lk(pendingsMutex_);
+        pendings_.erase(id);
+    };
 
     auto pending = std::make_shared<PendingResponse>();
     {
@@ -105,21 +131,23 @@ json CDPSession::Call(const std::string& method,
         pendings_[id] = pending;
     }
 
-    // 发
     {
         std::lock_guard<std::mutex> lk(ws_->sendMtx);
         if (!ws_->sock.SendText(msg.dump())) {
-            pendings_.erase(id);
-            throw std::runtime_error("CDP send failed");
+            removePending();
+            throw std::runtime_error("CDP send failed (" + method + ")");
         }
     }
 
-    auto result = WaitForResponse(id, timeoutMs);
-
-    {
-        std::lock_guard<std::mutex> lk(pendingsMutex_);
-        pendings_.erase(id);
+    json result;
+    try {
+        result = WaitForResponse(id, timeoutMs, method);
+    } catch (...) {
+        // 超时/断开时也必须清理，避免 pendings_ 无限增长。
+        removePending();
+        throw;
     }
+    removePending();
 
     if (result.contains("error")) {
         std::ostringstream oss;
@@ -136,31 +164,65 @@ void CDPSession::CallNoWait(const std::string& method, const json& params) {
     if (!connected_.load()) return;
     int id = nextId_.fetch_add(1);
     json msg = {{"id", id}, {"method", method}};
-    if (!params.empty()) msg["params"] = params;
+    if (!params.is_null() && !params.empty()) msg["params"] = params;
     try {
         std::lock_guard<std::mutex> lk(ws_->sendMtx);
-        ws_->sock.SendText(msg.dump());
-    } catch (...) {}
+        if (!ws_->sock.SendText(msg.dump()))
+            spdlog::warn("[CDP] SendNoWait failed: {} (id={})", method, id);
+    } catch (const std::exception& e) {
+        spdlog::warn("[CDP] SendNoWait exception: {} (id={})", e.what(), id);
+    }
 }
 
-json CDPSession::WaitForResponse(int id, int timeoutMs) {
+json CDPSession::WaitForResponse(int id, int timeoutMs,
+                                 const std::string& method) {
     std::shared_ptr<PendingResponse> pending;
     {
         std::lock_guard<std::mutex> lk(pendingsMutex_);
         auto it = pendings_.find(id);
         if (it == pendings_.end())
-            throw std::runtime_error("Pending response lost");
+            throw std::runtime_error("Pending response lost (" + method + ")");
         pending = it->second;
     }
 
     std::unique_lock<std::mutex> lk(pending->mtx);
     if (!pending->cv.wait_for(lk,
                               std::chrono::milliseconds(timeoutMs),
-                              [&] { return pending->received; })) {
-        throw std::runtime_error("CDP call timeout (id=" +
-                                 std::to_string(id) + ")");
+                              [&] {
+                                  return pending->received ||
+                                         pending->disconnected;
+                              })) {
+        std::ostringstream oss;
+        oss << "CDP call timeout (id=" << id
+            << ", method=" << method
+            << ", timeoutMs=" << timeoutMs << ")";
+        throw std::runtime_error(oss.str());
+    }
+
+    if (pending->disconnected) {
+        std::ostringstream oss;
+        oss << "CDP session disconnected while waiting for " << method
+            << " (id=" << id << ")";
+        throw std::runtime_error(oss.str());
     }
     return pending->response;
+}
+
+void CDPSession::FailAllPending(const std::string& reason) {
+    std::lock_guard<std::mutex> lk(pendingsMutex_);
+    for (auto& kv : pendings_) {
+        auto& pending = kv.second;
+        {
+            std::lock_guard<std::mutex> plk(pending->mtx);
+            if (!pending->received) {
+                pending->response = json::object({
+                    {"error", {{"code", -32000}, {"message", reason}}}
+                });
+                pending->disconnected = true;
+            }
+        }
+        pending->cv.notify_all();
+    }
 }
 
 // ----------------------------------------------------------------------------

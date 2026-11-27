@@ -123,5 +123,12 @@
     "terminal.integrated.defaultProfile.windows": "Git Bash",
     "terminal.integrated.env.windows": {
         "PATH": "E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${env:PATH}"
-    }
+    },
+    "python-envs.pythonProjects": [
+        {
+            "path": "cdrive_scan.py",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
 }

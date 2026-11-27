@@ -1,4 +1,5 @@
 # ---- 构建输出 ----
+build/
 build-mingw/
 bin/
 lib/

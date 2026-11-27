@@ -20,6 +20,7 @@
 #include "newrpa/plugin/IBankPlugin.h"
 #include "newrpa/util/Config.h"
 #include "newrpa/util/LogSetup.h"
+#include "commands/BankCommands.h"
 #include "newrpa/util/StringUtils.h"
 
 #include <nlohmann/json.hpp>
@@ -367,317 +368,36 @@ int MainRun(const Args &args, const newrpa::util::GlobalConfig &cfg) {
     plugin->SetSession(session, browser);
     plugin->SetConfig(*bankCfg);
 
-    // 6. 执行 action
+    // 6. 执行 action —— P1：命令总线分发
+    //    前置流程（配置查找 / 插件加载 / Chrome 启动 / CDP 连接）与原实现完全一致。
     spdlog::info("Running action: {}", args.action);
 
-    auto hasCap = [&](uint32_t c) { return (plugin->Capabilities() & c) == c; };
+    newrpa::arch::AppContext ctx;
+    ctx.action       = args.action;
+    ctx.begin        = args.begin;
+    ctx.end          = args.end;
+    ctx.amount       = args.amount;
+    ctx.nums         = args.nums;
+    ctx.paccno       = args.paccno;
+    ctx.no           = args.no;
+    ctx.reuseCookie  = args.reuseCookie;
+    ctx.configPath   = args.config;
+    ctx.bank         = *bankCfg;
+    ctx.bankPlugin   = plugin.get();
+    ctx.session      = session;
+    ctx.browser      = browser;
+    ctx.globalConfig = &cfg;
+    ctx.downloadDir  = fs::absolute("downloads").string();
+    ctx.stateDir     = fs::absolute("state").string();
 
-    if (args.action == "all-accounts" || args.action == "all-account") {
-      // 所有账号：历史交易(增量,优先) / 当日交易 / 余额 / 电子回单
-      auto r = plugin->Login();
-      spdlog::info("[ALL-ACC] Login result: {}", r);
-      if (r != "ok" && r != "already logged in") {
-        spdlog::error("[ALL-ACC] Login failed, abort");
+    auto bus = newrpa::app::MakeBankCommandBus();
+    auto result = bus->Execute(args.action, ctx);
+    if (!result) {
+        if (result.error().code == "command.unknown")
+            spdlog::error("Unknown action: {}", args.action);
+        else if (!result.error().message.empty())
+            spdlog::error("{}", result.error().message);
         return 1;
-      }
-      auto summary = plugin->RunAllAccounts();
-      spdlog::info("[ALL-ACC] SUMMARY:\n{}", summary);
-
-    } else if (args.action == "all") {
-      // 一次登录跑完整流程：余额 / 当日交易 / 历史交易 / 电子回单
-      auto r = plugin->Login();
-      spdlog::info("[ALL] Login result: {}", r);
-      if (r != "ok" && r != "already logged in") {
-        spdlog::error("[ALL] Login failed, abort");
-        return 1;
-      }
-      auto bal = plugin->GetCurBal();
-      spdlog::info("[ALL] CurBal: {} rows", bal.size());
-      auto cur = plugin->GetCurTran();
-      spdlog::info("[ALL] CurTran: {} rows", cur.size());
-      std::string begin = args.begin.empty() ? "2026-01-01" : args.begin;
-      std::string end = args.end.empty() ? "2026-11-20" : args.end;
-      newrpa::plugin::DateRange range{begin, end};
-      auto his = plugin->GetHisTran(range);
-      spdlog::info("[ALL] HisTran: {} rows", his.size());
-      auto files = plugin->DownBankSlip(range);
-      for (auto &f : files)
-        spdlog::info("[ALL] Slip: {}", f);
-
-    } else if (args.action == "sniff") {
-      // ---- 抓包模式：CDP 登录 + 记录所有 XHR/Fetch 请求，落盘 JSON ----
-      using json = nlohmann::json;
-      json records = json::array();
-      std::mutex sniffMtx;
-      int hReq =
-          session->OnEvent("Network.requestWillBeSent", [&](const json &p) {
-            auto req = p.value("request", json::object());
-            std::string url = req.value("url", "");
-            std::string type = p.value("type", "");
-            // 只关心接口请求：XHR / Fetch / 其它非静态资源
-            bool isStatic =
-                (type == "Image" || type == "Stylesheet" || type == "Font" ||
-                 type == "Script" || type == "Media");
-            if (isStatic)
-              return;
-            json rec = {{"event", "request"},
-                        {"requestId", p.value("requestId", "")},
-                        {"type", type},
-                        {"method", req.value("method", "")},
-                        {"url", url}};
-            if (req.contains("headers"))
-              rec["headers"] = req["headers"];
-            if (req.contains("postData"))
-              rec["postData"] = req["postData"].get<std::string>();
-            {
-              std::lock_guard<std::mutex> lk(sniffMtx);
-              records.push_back(std::move(rec));
-            }
-          });
-      int hResp =
-          session->OnEvent("Network.responseReceived", [&](const json &p) {
-            auto resp = p.value("response", json::object());
-            std::string type = p.value("type", "");
-            if (type == "Image" || type == "Stylesheet" || type == "Font" ||
-                type == "Media")
-              return;
-            json rec = {{"event", "response"},
-                        {"requestId", p.value("requestId", "")},
-                        {"status", resp.value("status", 0)},
-                        {"mimeType", resp.value("mimeType", "")},
-                        {"url", resp.value("url", "")}};
-            if (resp.contains("headers"))
-              rec["headers"] = resp["headers"];
-            {
-              std::lock_guard<std::mutex> lk(sniffMtx);
-              records.push_back(std::move(rec));
-            }
-          });
-
-      spdlog::info(
-          "[SNIFF] Capturing network, running login + business actions...");
-      auto r = plugin->Login();
-      spdlog::info("[SNIFF] Login: {}", r);
-      if (r == "ok" || r == "already logged in") {
-        plugin->GetCurBal();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        plugin->GetCurTran();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        newrpa::plugin::DateRange dr{"2026-11-01", "2026-11-20"};
-        plugin->GetHisTran(dr);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      }
-
-      // 取登录后的 Cookie（Storage.getCookies 属于 browser-level，也能从 page
-      // 会话拿）
-      try {
-        auto ck = session->Call("Network.getCookies", json::object(), 5000);
-        json out = json::object();
-        if (ck.contains("cookies")) {
-          json arr = json::array();
-          for (auto &c : ck["cookies"]) {
-            arr.push_back({{"name", c.value("name", "")},
-                           {"value", c.value("value", "")},
-                           {"domain", c.value("domain", "")},
-                           {"path", c.value("path", "")}});
-          }
-          out["cookies"] = arr;
-        }
-        {
-          std::lock_guard<std::mutex> lk(sniffMtx);
-          records.push_back({{"event", "cookies_snapshot"}, {"data", out}});
-        }
-      } catch (const std::exception &e) {
-        spdlog::warn("[SNIFF] getCookies failed: {}", e.what());
-      }
-
-      session->OffEvent("Network.requestWillBeSent", hReq);
-      session->OffEvent("Network.responseReceived", hResp);
-
-      json dump;
-      dump["loginUrl"] = cfg.banks.empty() ? "" : cfg.banks[0].loginUrl;
-      dump["records"] = records;
-      fs::path outPath = fs::absolute("sniff_result.json");
-      std::ofstream ofs(outPath, std::ios::binary);
-      ofs << dump.dump(2);
-      ofs.close();
-      spdlog::info("[SNIFF] Wrote {} records to {}", records.size(),
-                   outPath.string());
-
-    } else if (args.action == "http-direct") {
-      // 混合模式：CDP 登录 + HTTP 直连取数
-      auto summary = plugin->HttpDirect();
-      spdlog::info("[HTTP-DIRECT] SUMMARY:\n{}", summary);
-
-    } else if (args.action == "http-session") {
-      // ---- 通用会话模式：RPA 登录 → 抓 Cookie 持久化 → 带 Cookie HTTP 取数
-      // ----
-      using json = nlohmann::json;
-      using newrpa::net::CookieJar;
-      using newrpa::net::HttpSession;
-      using newrpa::net::HttpTask;
-
-      fs::path stateDir = fs::absolute("state");
-      std::error_code mkEc;
-      fs::create_directories(stateDir, mkEc);
-      fs::path cookiePath =
-          stateDir / ("cookies_" + bankCfg->bankName + ".json");
-
-      CookieJar jar;
-      bool reused = false;
-      if (args.reuseCookie && fs::exists(cookiePath)) {
-        reused = jar.Load(cookiePath.string());
-        if (reused)
-          spdlog::info("[HTTP-SESSION] Reused {} cookies from {}", jar.size(),
-                       cookiePath.string());
-        else
-          spdlog::warn("[HTTP-SESSION] Cookie file invalid, will login again");
-      }
-
-      if (!reused) {
-        auto r = plugin->Login();
-        spdlog::info("[HTTP-SESSION] Login: {}", r);
-        if (r != "ok" && r != "already logged in") {
-          spdlog::error("[HTTP-SESSION] Login failed, abort");
-          return 1;
-        }
-        try {
-          auto cks = session->Call("Network.getCookies", json::object(), 5000);
-          jar = CookieJar::FromCdp(cks);
-          if (!jar.Save(cookiePath.string()))
-            spdlog::warn("[HTTP-SESSION] Cannot save cookies to {}",
-                         cookiePath.string());
-          else
-            spdlog::info("[HTTP-SESSION] Saved {} cookies -> {}", jar.size(),
-                         cookiePath.string());
-        } catch (const std::exception &e) {
-          spdlog::error("[HTTP-SESSION] Network.getCookies failed: {}",
-                        e.what());
-          return 1;
-        }
-      }
-
-      // 从登录后的页面取 origin，适配任意部署地址/端口
-      std::string href;
-      try {
-        auto ev = session->Call(
-            "Runtime.evaluate",
-            json{{"expression", "location.href"}, {"returnByValue", true}},
-            5000);
-        if (ev.contains("result") && ev["result"].contains("result"))
-          href = ev["result"]["result"].value("value", "");
-      } catch (const std::exception &e) {
-        spdlog::warn("[HTTP-SESSION] get location.href failed: {}", e.what());
-      }
-      std::string origin;
-      size_t sp = href.find("://");
-      if (sp != std::string::npos) {
-        size_t slash = href.find('/', sp + 3);
-        origin =
-            href.substr(0, slash == std::string::npos ? href.size() : slash);
-      }
-      if (origin.empty() && !bankCfg->loginUrl.empty()) {
-        size_t sc = bankCfg->loginUrl.find("://");
-        if (sc != std::string::npos) {
-          size_t slash = bankCfg->loginUrl.find('/', sc + 3);
-          origin = bankCfg->loginUrl.substr(
-              0, slash == std::string::npos ? bankCfg->loginUrl.size() : slash);
-        }
-      }
-      if (origin.empty())
-        origin = "https://cbank.bankofbeijing.com.cn:9081";
-      spdlog::info("[HTTP-SESSION] origin={}, cookies={}", origin, jar.size());
-
-      // 任务列表来自 config.json 根级 httpTasks；没有则使用 BCB 演示站兜底
-      std::vector<HttpTask> tasks;
-      try {
-        std::ifstream ifs(fs::path(args.config), std::ios::binary);
-        if (ifs) {
-          json root;
-          ifs >> root;
-          if (root.contains("httpTasks"))
-            tasks = HttpSession::TasksFromJson(root["httpTasks"]);
-        }
-      } catch (const std::exception &e) {
-        spdlog::warn("[HTTP-SESSION] parse httpTasks failed: {}", e.what());
-      }
-      if (tasks.empty()) {
-        spdlog::warn(
-            "[HTTP-SESSION] No httpTasks in config, using BCB defaults");
-        tasks = HttpSession::DefaultTasks(origin);
-      }
-
-      HttpSession hs;
-      hs.SetCookieJar(jar);
-      hs.SetOrigin(origin);
-      hs.SetBank(bankCfg->bankName);
-      hs.SetReferer(origin + "/");
-      hs.SetIgnoreCertErrors(true);
-      hs.SetTimeout(30000);
-      auto summary = hs.RunTasks(tasks, fs::absolute("downloads").string());
-      spdlog::info("[HTTP-SESSION] SUMMARY:\n{}", summary);
-
-    } else if (args.action == "login") {
-      if (!hasCap(newrpa::plugin::IBankPlugin::CAP_LOGIN)) {
-        spdlog::error("Plugin doesn't support login");
-        return 1;
-      }
-      auto r = plugin->Login();
-      spdlog::info("Login result: {}", r);
-
-    } else if (args.action == "curbal") {
-      plugin->Login();
-      auto rows = plugin->GetCurBal();
-      spdlog::info("CurBal: {} rows", rows.size());
-      for (auto &row : rows) {
-        for (auto &kv : row)
-          spdlog::info("  {}={}", kv.first, kv.second);
-      }
-
-    } else if (args.action == "curtran") {
-      plugin->Login();
-      auto rows = plugin->GetCurTran();
-      spdlog::info("CurTran: {} rows", rows.size());
-      for (auto &r : rows)
-        spdlog::info("  {} | {} | {} | {} | {}", r.transDate, r.direction,
-                     r.amount, r.opAccount, r.opAccountName);
-
-    } else if (args.action == "histran") {
-      if (args.begin.empty() || args.end.empty()) {
-        spdlog::error("--begin and --end required");
-        return 1;
-      }
-      plugin->Login();
-      newrpa::plugin::DateRange range{args.begin, args.end};
-      auto rows = plugin->GetHisTran(range);
-      spdlog::info("HisTran: {} rows", rows.size());
-
-    } else if (args.action == "slip") {
-      if (args.begin.empty() || args.end.empty()) {
-        spdlog::error("--begin and --end required");
-        return 1;
-      }
-      plugin->Login();
-      newrpa::plugin::DateRange range{args.begin, args.end};
-      auto files = plugin->DownBankSlip(range);
-      for (auto &f : files)
-        spdlog::info("Slip: {}", f);
-
-    } else if (args.action == "payment") {
-      auto r = plugin->Payment(args.amount, args.nums, args.paccno);
-      spdlog::info("Payment: {}", r);
-
-    } else if (args.action == "approval") {
-      auto r = plugin->Approval(args.no);
-      spdlog::info("Approval: {}", r);
-
-    } else if (args.action == "query") {
-      auto r = plugin->Query(args.no);
-      spdlog::info("Query: {}", r);
-
-    } else {
-      spdlog::error("Unknown action: {}", args.action);
-      return 1;
     }
 
     plugin->Close();

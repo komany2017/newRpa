@@ -300,7 +300,9 @@ void NetworkDomain::InterceptRequest(
                     json p = {{"requestId", reqId}};
                     for (auto it = fulfill.begin(); it != fulfill.end(); ++it)
                         p[it.key()] = it.value();
-                    s_->Call("Fetch.fulfillRequest", p);
+                    // 该回调运行在 CDP 接收线程上；同步 Call 会等待一个
+                    // 只能由接收线程自己读取的响应，必然超时。这里只发不等。
+                    s_->CallNoWait("Fetch.fulfillRequest", p);
                 });
 }
 

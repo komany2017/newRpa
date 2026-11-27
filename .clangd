@@ -1,0 +1,43 @@
+# =====================================================================
+# clangd 项目配置 —— E:\NewRpa-Next
+#
+# 仅在「让 clangd 接管 IntelliSense」时真正生效
+# （即 .vscode/settings.json 里 C_Cpp.intelliSenseEngine = "disabled"）。
+# 当前工作区约定由 cpptools 负责 IntelliSense，本文件主要用于：
+#   1) 让 clangd 后台索引能定位到 build-mingw/compile_commands.json
+#   2) 万一切到 clangd，不用再重复调参
+# =====================================================================
+
+CompileFlags:
+  # 编译数据库位置（相对工作区根目录）
+  CompilationDatabase: build-mingw
+  # g++ 的系统头路径由 --query-driver 自动查询（见 settings.json 的 clangd.arguments），
+  # 这里只补 CMake 不导出、但 clangd 单独解析时缺的宏
+  Add:
+    - -D_WIN32
+    - -DNOMINMAX
+    - -DWIN32_LEAN_AND_MEAN
+    - -DUNICODE
+    - -D_UNICODE
+
+Diagnostics:
+  UnusedIncludes: None
+  # 项目大量使用 MinGW + GDI+，clang-tidy 误报率高，默认关闭；
+  # 需要时在单个文件里手开
+  ClangTidy:
+    Add: []
+    Remove:
+      - modernize-*
+      - readability-*
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: No
+
+Completion:
+  AllScopes: Yes
+
+SemanticTokens:
+  Enabled: Yes

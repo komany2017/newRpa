@@ -2,7 +2,11 @@
 
 add_library(bcb_plugin SHARED
     BCBPlugin.cpp
-    ../../core/src/singleUsbbox/SkKeyBoard.cpp
+    strategy/SliderVision.cpp
+    strategy/DingXiangSlider.cpp
+    strategy/ClickWordCaptcha.cpp
+    variant/BcbVariant.cpp
+    ../../core/src/singleUsbbox/HidKeyBoard.cpp
     ../../core/src/singleUsbbox/hid_box.cpp
     ../../core/src/singleUsbbox/HidMouse.cpp
 )

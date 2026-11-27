@@ -1,0 +1,69 @@
+# =====================================================================
+# .clang-format —— E:\NewRpa-Next
+#
+# 对齐现有代码风格（采样自 plugins/bcb/BCBPlugin.cpp 与
+# core/src/keyBoard/HidMouse.cpp）：
+#   - 大括号 K&R（左括号同行）
+#   - 缩进 4 空格，不用 Tab
+#   - 指针/引用符左靠（Type* p）
+#   - 中文注释不重排（ReflowComments: false，否则中文会被拉成一行）
+#
+# 用法：文件内 Shift+Alt+F 手动格式化（未开 formatOnSave，避免全量 diff）
+# =====================================================================
+BasedOnStyle: LLVM
+Language: Cpp
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# 大括号：函数/类/控制语句统一左括号同行（K&R）
+BreakBeforeBraces: Attach
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  BeforeCatch: false
+  BeforeElse: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+AccessModifierOffset: -4
+IndentCaseLabels: false
+IndentPPDirectives: None
+
+# 指针/引用符号左靠
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+# 短语句
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: Inline
+
+# 对齐（关闭，避免制造大段无意义 diff）
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignTrailingComments: false
+
+# 注释与 include
+ReflowComments: false      # 中文注释不重排
+SortIncludes: false        # 不动 include 顺序（third_party 有依赖顺序）
+IncludeBlocks: Preserve
+
+# 其他
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+FixNamespaceComments: false
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+BreakStringLiterals: false  # C++ 里含大段 JS 字符串，别拆

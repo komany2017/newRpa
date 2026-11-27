@@ -8,6 +8,7 @@
 // ============================================================================
 
 #include "newrpa/NewRpaExport.h"
+#include "newrpa/arch/Result.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/chrome/ChromeBrowser.h"
 
@@ -18,6 +19,25 @@
 #include <ctime>
 
 namespace newrpa {
+// ----------------------------------------------------------------------------
+// Result 风格的登录结果 / 错误码（P5 统一接口；原 PluginEx.h 已删除）
+// ----------------------------------------------------------------------------
+namespace arch {
+struct LoginOutcome {
+    std::string raw;              // "ok" / "already logged in" / 原始错误信息
+    bool        loggedIn = false; // 是否为成功状态
+};
+namespace BankErr {
+inline const char* LoginFailed   = "bank.login_failed";
+inline const char* LoginNoCap    = "bank.login_no_cap";
+inline const char* RangeMissing  = "bank.range_missing";
+inline const char* QueryFailed   = "bank.query_failed";
+inline const char* SlipFailed    = "bank.slip_failed";
+inline const char* NoPlugin      = "bank.no_plugin";
+inline const char* UnknownAction = "command.unknown";
+} // namespace BankErr
+} // namespace arch
+
 namespace plugin {
 
 // 银行配置（从旧项目的 BankObject 简化过来）
@@ -97,26 +117,26 @@ public:
 
     // --- 核心业务 ---
 
-    // 登录网银
-    // 返回 "ok" / "need_ukey" / "need_captcha" / 错误信息
-    virtual std::string Login() = 0;
+    // 登录网银：raw 保留原始字符串以维持日志文本，loggedIn 是结构化成功标记
+    virtual arch::Result<arch::LoginOutcome> Login() = 0;
 
     // 查询当日余额。返回 {account, balance, currency, time}
-    virtual std::vector<std::map<std::string, std::string>>
+    virtual arch::Result<std::vector<std::map<std::string, std::string>>>
     GetCurBal() = 0;
 
     // 查询当日交易流水
-    virtual std::vector<Transaction> GetCurTran() = 0;
+    virtual arch::Result<std::vector<Transaction>> GetCurTran() = 0;
 
     // 查询历史流水（指定时间段）
-    virtual std::vector<Transaction> GetHisTran(const DateRange& range) = 0;
+    virtual arch::Result<std::vector<Transaction>>
+    GetHisTran(const DateRange& range) = 0;
 
     // 下载电子回单（返回下载的文件路径）
-    virtual std::vector<std::string>
+    virtual arch::Result<std::vector<std::string>>
     DownBankSlip(const DateRange& range) = 0;
 
     // 批量付款：amount 金额、sn 流水号、对方账号 paccno
-    virtual std::string Payment(
+    virtual arch::Result<std::string> Payment(
         const std::string& transAmount,
         const std::string& transNums,
         const std::string& paccno,
@@ -124,30 +144,34 @@ public:
         const std::string& sn = "") = 0;
 
     // 审批（按流水号）
-    virtual std::string Approval(const std::string& no) = 0;
+    virtual arch::Result<std::string> Approval(const std::string& no) = 0;
 
     // 查询交易状态
-    virtual std::string Query(const std::string& no) = 0;
+    virtual arch::Result<std::string> Query(const std::string& no) = 0;
 
     // 关闭，释放资源（析构也会调一次，幂等）
     virtual void Close() = 0;
 
     // 遍历所有账号跑完整流程（历史/当日/余额/回单，历史增量）。
     // 默认不支持；支持的插件（如 BCB）重写此方法。
-    virtual std::string RunAllAccounts() {
-        return std::string("all-accounts not supported by ") + GetId();
+    virtual arch::Result<std::string> RunAllAccounts() {
+        return arch::Result<std::string>::Ok(
+            std::string("all-accounts not supported by ") + GetId());
     }
 
     // 混合模式：CDP 登录后，改用纯 HTTP 直连接口下载数据。
     // 默认不支持；支持的插件（如 BCB）重写此方法。
-    virtual std::string HttpDirect() {
-        return std::string("http-direct not supported by ") + GetId();
+    virtual arch::Result<std::string> HttpDirect() {
+        return arch::Result<std::string>::Ok(
+            std::string("http-direct not supported by ") + GetId());
     }
 
     // --- 工具 ---
 
     // 触发 UKey / 证书处理（部分银行需要）
-    virtual bool TriggerUKey() { return true; }
+    virtual arch::Result<bool> TriggerUKey() {
+        return arch::Result<bool>::Ok(true);
+    }
 };
 
 // 插件 DLL 导出约定

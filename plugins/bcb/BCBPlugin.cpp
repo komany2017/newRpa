@@ -12,6 +12,7 @@
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/ocr/ChaojiyingOcr.h"
 #include "newrpa/io/ExcelWriter.h"
+#include "newrpa/io/SlipBundle.h"
 #include "newrpa/net/HttpDownloader.h"
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
@@ -21,7 +22,7 @@
 #define NOMINMAX
 #endif
 #include <newrpa/singleUsbbox/HidMouse.hpp>
-#include "SkKeyBoard.h"
+#include <newrpa/singleUsbbox/HidKeyBoard.h>
 #include <objidl.h>
 #include <gdiplus.h>
 
@@ -38,6 +39,8 @@
 #include <utility>
 #include <iomanip>
 #include <ctime>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdlib>
 #include <cmath>
 #include <random>
@@ -112,7 +115,14 @@ void DestroyPlugin(plugin::IBankPlugin* p) { delete p; }
 // 构造/析构
 // ----------------------------------------------------------------------------
 
-BCBPlugin::BCBPlugin()  = default;
+BCBPlugin::BCBPlugin()
+    : variant_(variant::MakeVariantForLoginUrl("")),
+      sliderSolver_(std::make_unique<strategy::DingXiangSliderSolver>()),
+      captchaChain_(std::make_unique<strategy::BcbCaptchaChain>()) {
+    // 保持既定行为：文字点选验证码直接转人工；自动点字策略已实现但默认关闭。
+    captchaChain_->Add(std::make_unique<strategy::ChaojiyingClickWordSolver>(false));
+    captchaChain_->Add(std::make_unique<strategy::HumanClickWordSolver>());
+}
 BCBPlugin::~BCBPlugin() { Close(); }
 
 uint32_t BCBPlugin::Capabilities() const {
@@ -135,15 +145,43 @@ void BCBPlugin::SetSession(std::shared_ptr<cdp::CDPSession> s,
         net_    = std::make_unique<cdp::NetworkDomain>(session_.get());
         // 显式 enable Network（Chrome 156+ 部分 domain 需要）
         try { net_->Enable(); } catch (...) {}
+        // 自动接管原生 JS 弹窗(alert/confirm)：查询版切路由时网银常弹 confirm，
+        // 一旦挂起，Runtime.evaluate 全部阻塞 -> 3s 超时 -> 异常直冲 MainRun
+        // -> 栈展开时 ChromeLauncher::Shutdown() 杀 Chrome，F5 调试随之中断。
+        // 该回调运行在 CDP 接收线程，绝不能同步 Call(会等自己的响应而死等)，
+        // 只能用 CallNoWait 只发不等；用 weak_ptr 避免插件析构后悬空。
+        if (jsDialogEvHandle_)
+            session_->OffEvent("Page.javascriptDialogOpening", jsDialogEvHandle_);
+        std::weak_ptr<cdp::CDPSession> weak = session_;
+        jsDialogEvHandle_ = session_->OnEvent(
+            "Page.javascriptDialogOpening", [weak](const nlohmann::json& p) {
+                spdlog::warn("[BCB] JS dialog auto-accept: {}",
+                             p.value("message", std::string()));
+                if (auto s = weak.lock())
+                    s->CallNoWait("Page.handleJavaScriptDialog",
+                                  {{"accept", true}});
+            });
     }
 }
 
 void BCBPlugin::SetConfig(const plugin::BankConfig& cfg) {
     cfg_ = cfg;
+    // P4：版本差异只在配置时决策一次，业务方法不再重复解析 loginUrl。
+    // 空 loginUrl 与旧 Login() 的默认 URL 一致，按演示版处理。
+    variant_ = variant::MakeVariantForLoginUrl(
+        cfg_.loginUrl.empty()
+            ? "https://cbank.bankofbeijing.com.cn:9081/login?redirect=%2F"
+            : cfg_.loginUrl);
+    spdlog::info("[BCB] 版本变体: {}", variant_->name());
 }
 
 void BCBPlugin::Close() {
     loggedIn_ = false;
+    UnpinBcbChromeTopmost();
+    if (session_ && jsDialogEvHandle_) {
+        session_->OffEvent("Page.javascriptDialogOpening", jsDialogEvHandle_);
+        jsDialogEvHandle_ = 0;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -182,6 +220,33 @@ std::string BCBPlugin::EvalStrAsync(const std::string& js, int timeoutMs) {
 bool BCBPlugin::EvalBool(const std::string& js) {
     if (!rt_) return false;
     return rt_->EvalBool(js);
+}
+
+// 带容错的 EvalBool：导航后页面慢 / 弹窗刚挂起时，单次 3s 超时只返回 false，
+// 交给调用方重试，绝不让异常一路抛到 MainRun 把整个进程(和 Chrome)带走。
+bool BCBPlugin::EvalBoolQ(const std::string& js, int timeoutMs) {
+    if (!rt_) return false;
+    try {
+        return rt_->EvalBool(js, timeoutMs);
+    } catch (const std::exception& e) {
+        spdlog::warn("[BCB] EvalBool 超时/失败（跳过本轮）: {}", e.what());
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+// 控制线程兜底：事件回调漏发或 Chrome 未及时响应时，主动 accept 掉
+// 仍挂着的原生 JS 弹窗。没有弹窗时该命令会报错，忽略即可。
+void BCBPlugin::DismissBcbJsDialog() {
+    if (!session_) return;
+    try {
+        session_->Call("Page.handleJavaScriptDialog",
+                       {{"accept", true}}, 1500);
+        spdlog::info("[BCB] JS dialog dismissed (fallback)");
+    } catch (...) {
+        // 无弹窗，正常
+    }
 }
 
 double BCBPlugin::EvalNum(const std::string& js) {
@@ -334,11 +399,6 @@ bool BCBPlugin::EnableNativeDownloads() {
     }
 }
 
-bool BCBPlugin::IsQueryVersion() {
-    // 查询版 loginUrl 带 version=query；演示版带 :9081
-    return cfg_.loginUrl.find("version=query") != std::string::npos;
-}
-
 std::string BCBPlugin::BaseOrigin() {
     // 从 loginUrl 提取 scheme://host[:port]（不含路径/查询串）
     // 查询版：https://cbank.bankofbeijing.com.cn
@@ -361,6 +421,9 @@ bool BCBPlugin::GotoRoute(const std::string& route) {
         spdlog::warn("[BCB] Page.navigate exception: {}", e.what());
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(2800));
+    // 导航期间/导航后网银可能弹原生 confirm，挂起会让后续所有
+    // Runtime.evaluate 卡到 3s 超时。这里先兜底 accept 一次再返回。
+    DismissBcbJsDialog();
     return true;
 }
 
@@ -405,12 +468,13 @@ std::string BCBPlugin::DumpQueryTableJson() {
             var tb=tables[t];
             var heads=[];
             var hrows=tb.querySelectorAll('.el-table__header-wrapper th');
+            // 不跳过空表头：电子回单页首列是勾选列，表头为空但数据行有对应单元格，
+            // 过滤掉会导致表头比数据行少一列，全表错位（凭证号<-勾选、日期<-凭证号…）
             for(var i=0;i<hrows.length;i++){
-                var h=(hrows[i].innerText||hrows[i].textContent||'').trim();
-                if(h)heads.push(h);
+                heads.push((hrows[i].innerText||hrows[i].textContent||'').trim());
             }
             if(!heads.length)continue;
-            var data=[heads];
+            var rows=[];
             var brows=tb.querySelectorAll('.el-table__body-wrapper tbody tr');
             for(var r=0;r<brows.length;r++){
                 var cells=[];
@@ -419,8 +483,26 @@ std::string BCBPlugin::DumpQueryTableJson() {
                     var cell=tds[c].querySelector('.cell')||tds[c];
                     cells.push((cell.innerText||cell.textContent||'').trim());
                 }
-                if(cells.length)data.push(cells);
+                if(cells.length)rows.push(cells);
             }
+            // 归一：首列表头为空且所有行首格为空 -> 勾选列，整列丢弃
+            if(heads.length && heads[0]==='' && rows.length){
+                var allEmpty=true;
+                for(var r=0;r<rows.length;r++){
+                    if(!rows[r].length||rows[r][0]!==''){allEmpty=false;break;}
+                }
+                if(allEmpty){
+                    heads.shift();
+                    for(var r=0;r<rows.length;r++)rows[r].shift();
+                }
+            }
+            if(!heads.length)continue;
+            // 行宽与表头对齐：多的空尾列去掉，少的补空串
+            for(var r=0;r<rows.length;r++){
+                while(rows[r].length>heads.length && rows[r][rows[r].length-1]==='')rows[r].pop();
+                while(rows[r].length<heads.length)rows[r].push('');
+            }
+            var data=[heads].concat(rows);
             if(data.length>1)out.push({rowCount:data.length,data:data});
         }
         if(!out.length){
@@ -445,9 +527,13 @@ std::vector<std::string> BCBPlugin::DoQueryExport(const std::string& route,
     EnableNativeDownloads();
     GotoRoute(route);
 
-    // 等页面表单渲染
-    for (int i = 0; i < 20 && !EvalBool("!!document.querySelector('.el-date-editor')"); ++i)
+    // 等页面表单渲染（带容错：单次 evaluate 超时不致命，最多重试 20 次；
+    // 每轮顺手 accept 掉可能刚弹出的原生 confirm，避免后续调用全被阻塞）
+    for (int i = 0; i < 20; ++i) {
+        if (EvalBoolQ("!!document.querySelector('.el-date-editor')")) break;
+        DismissBcbJsDialog();
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
 
     if (!begin.empty() && !end.empty()) SetQueryDateRange(begin, end);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
@@ -466,6 +552,15 @@ std::vector<std::string> BCBPlugin::DoQueryExport(const std::string& route,
         std::string jp = (fs::path(DownloadDir()) / (dataTag + "_data.json")).string();
         SaveTextFile(jp, tables);
         spdlog::info("[BCB] {} 表格已存 ({} bytes)", dataTag, tables.size());
+    }
+    // 回单页顺带存一份「页面 Vue 模型全字段」（含表格未显示的流水号/账号/金额），
+    // 供 PDF 与行做精确匹配（PDF 正文里有流水号）
+    if (receipt) {
+        std::string rich = DumpVueRowsJson();
+        if (!rich.empty() && rich != "[]") {
+            SaveTextFile((fs::path(DownloadDir()) / (dataTag + "_fields.json")).string(), rich);
+            spdlog::info("[BCB] {} 全字段已存 ({} bytes)", dataTag, rich.size());
+        }
     }
 
     // 快照下载目录（写 data.json 之后）
@@ -511,6 +606,228 @@ std::vector<std::string> BCBPlugin::DoQueryExport(const std::string& route,
     return WaitForNewFiles(before, dataTag, 12000);
 }
 
+// ----------------------------------------------------------------------------
+// 页面数据模型读取（表格没显示的字段也能拿到：流水号 / 账号 / 金额 ...）
+// ----------------------------------------------------------------------------
+std::string BCBPlugin::DumpVueRowsJson() {
+    std::string js = R"(
+        (function(){
+        var out=[];
+        var ts=document.querySelectorAll('.el-table');
+        for(var i=0;i<ts.length;i++){
+            var vm=ts[i].__vue__;
+            var d=vm&&vm.store&&vm.store.states&&vm.store.states.data;
+            if(!d||!d.length)continue;
+            var rows=[],keys=[];
+            for(var k=0;k<d.length;k++){
+                var r=d[k],o={};
+                for(var key in r){
+                    var v=r[key];
+                    if(v===null||v===undefined){o[key]='';continue;}
+                    var t=typeof v;
+                    // 只取标量，跳过嵌套对象/数组（可能循环引用，且对账用不到）
+                    if(t==='object'||t==='function')continue;
+                    o[key]=String(v);
+                    if(keys.indexOf(key)<0)keys.push(key);
+                }
+                rows.push(o);
+            }
+            out.push({tableIndex:i,fields:keys,rowCount:rows.length,rows:rows});
+        }
+        return JSON.stringify(out);})()
+    )";
+    return EvalStr(js);
+}
+
+int BCBPlugin::CountReceiptRows() {
+    std::string js = R"(
+        (function(){var ts=document.querySelectorAll('.el-table');
+        for(var i=0;i<ts.length;i++){var vm=ts[i].__vue__;
+        var d=vm&&vm.store&&vm.store.states&&vm.store.states.data;
+        if(d&&d.length)return String(d.length);}return '0';})()
+    )";
+    std::string s = EvalStr(js);
+    try { return s.empty() ? 0 : std::stoi(s); } catch (...) { return 0; }
+}
+
+std::string BCBPlugin::SelectReceiptRow(int rowIdx) {
+    std::string js =
+        "(function(){var ts=document.querySelectorAll('.el-table');"
+        "for(var i=0;i<ts.length;i++){var vm=ts[i].__vue__;"
+        "var d=vm&&vm.store&&vm.store.states&&vm.store.states.data;"
+        "if(!d||!d.length)continue;"
+        "try{if(vm.clearSelection)vm.clearSelection();}catch(e){}"
+        "var k=" + std::to_string(rowIdx) + ";"
+        "if(k<0||k>=d.length)return 'range:'+d.length;"
+        "try{vm.toggleRowSelection(d[k],true);}catch(e){return 'fail:'+e;}"
+        "var n=0;try{n=vm.store.states.selection?vm.store.states.selection.length:-1;}catch(e){}"
+        "return 'ok:'+d.length+'/'+n+'@'+i;}return 'no-table';})()";
+    std::string r = EvalStr(js);
+    if (r.rfind("ok:", 0) != 0) {
+        spdlog::warn("[BCB] 勾选第 {} 行失败: {}", rowIdx, r);
+        return r.empty() ? "no-response" : r;
+    }
+    return "";
+}
+
+bool BCBPlugin::GenerateReceiptForSelection() {
+    // 生成回单
+    bool gen = EvalBool("(function(){var b=document.querySelectorAll('button');"
+                        "for(var e of b){if((e.innerText||'').trim()==='生成回单'&&!e.disabled)"
+                        "{e.click();return true;}}return false;})()");
+    if (!gen) { spdlog::warn("[BCB] 未找到可用的「生成回单」按钮"); return false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+
+    // 方式一（PDF）
+    EvalBool("(function(){var e=document.querySelectorAll('.el-dialog label,.el-dialog .el-radio');"
+             "for(var x of e){if((x.innerText||'').indexOf('方式一')>=0){x.click();return true;}}"
+             "return false;})()");
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+    // 确认（优先弹窗内）
+    bool conf = EvalBool("(function(){var b=document.querySelectorAll('.el-dialog button');"
+                         "for(var e of b){if((e.innerText||'').replace(/\\s+/g,'')==='确认')"
+                         "{e.click();return true;}}return false;})()");
+    if (!conf)
+        conf = EvalBool("(function(){var b=document.querySelectorAll('button');for(var e of b)"
+                        "{if((e.innerText||'').trim()==='确认'&&!e.disabled){e.click();return true;}}"
+                        "return false;})()");
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));
+
+    // 刷新出可下载的回单
+    EvalBool("(function(){var b=document.querySelectorAll('button');for(var e of b)"
+             "{if((e.innerText||'').trim()==='刷新'&&!e.disabled){e.click();return true;}}"
+             "return false;})()");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    return conf;
+}
+
+std::vector<std::string> BCBPlugin::DoQueryExportPerRow(const std::string& route,
+                                                        const std::string& begin,
+                                                        const std::string& end,
+                                                        const std::string& dataTag) {
+    spdlog::info("[BCB] === 逐条下载回单 {} ({}~{}) ===", dataTag, begin, end);
+    EnableNativeDownloads();
+    GotoRoute(route);
+
+    for (int i = 0; i < 20; ++i) {
+        if (EvalBoolQ("!!document.querySelector('.el-date-editor')")) break;
+        DismissBcbJsDialog();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+
+    if (!begin.empty() && !end.empty()) SetQueryDateRange(begin, end);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    EvalBool("(function(){var b=document.querySelectorAll('.el-message-box button');"
+             "for(var e of b){if((e.innerText||'').trim()==='确定'){e.click();return true;}}"
+             "return false;})()");
+
+    ClickButtonByText("确定");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+
+    // 1) 落盘两份数据：DOM 二维表（保持原格式）+ Vue 全字段（含流水号/账号）
+    std::string tables = DumpQueryTableJson();
+    if (!tables.empty() && tables != "[]") {
+        SaveTextFile((fs::path(DownloadDir()) / (dataTag + "_data.json")).string(), tables);
+        spdlog::info("[BCB] {} 表格已存 ({} bytes)", dataTag, tables.size());
+    }
+    std::string rich = DumpVueRowsJson();
+    if (!rich.empty() && rich != "[]") {
+        SaveTextFile((fs::path(DownloadDir()) / (dataTag + "_fields.json")).string(), rich);
+        spdlog::info("[BCB] {} 全字段已存 ({} bytes)", dataTag, rich.size());
+    }
+
+    int n = CountReceiptRows();
+    int maxRows = 30;
+    if (const char* e = std::getenv("BCB_SLIP_MAX_ROWS")) {
+        int v = std::atoi(e);
+        if (v > 0) maxRows = v;
+    }
+    spdlog::info("[BCB] 回单待下载行数 = {} (逐条上限 {})", n, maxRows);
+    std::vector<std::string> saved;
+    if (n <= 0) {
+        spdlog::warn("[BCB] 回单页无数据，跳过逐条下载");
+        return saved;
+    }
+    if (n > maxRows) {
+        // 逐条下载每行约 10s，行数多时太慢，交回批量下载（一个 ZIP 全打包）
+        spdlog::warn("[BCB] 行数 {} 超过逐条上限 {}，改用批量下载", n, maxRows);
+        return saved;
+    }
+
+    // 轮次基线：循环开始前的目录快照（用于轮末兜底扫描晚落盘的文件）
+    std::set<std::string> roundBaseline;
+    {
+        std::string dir = DownloadDir();
+        std::error_code ec;
+        for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec))
+            if (!ec && it->is_regular_file(ec))
+                roundBaseline.insert(it->path().filename().string());
+    }
+
+    // 2) 一行一行：只勾这一行 → 生成 → 下载（失败重试 1 次）
+    for (int k = 0; k < n; ++k) {
+        char seq[16];
+        std::snprintf(seq, sizeof(seq), "%02d", k + 1);
+        std::vector<std::string> got;
+        for (int attempt = 1; attempt <= 2 && got.empty(); ++attempt) {
+            if (attempt > 1)
+                spdlog::warn("[BCB] 第 {}/{} 行第 1 次未取得文件，重试", k + 1, n);
+            std::string selErr = SelectReceiptRow(k);
+            if (!selErr.empty()) {
+                spdlog::warn("[BCB] 第 {}/{} 行勾选失败({})，跳过", k + 1, n, selErr);
+                break;
+            }
+            if (!GenerateReceiptForSelection()) {
+                spdlog::warn("[BCB] 第 {}/{} 行生成回单失败，跳过", k + 1, n);
+                break;
+            }
+            // 快照当前下载目录（SnapshotDownloadDir 定义在本函数之后，这里内联）
+            std::vector<std::string> before;
+            {
+                std::string dir = DownloadDir();
+                std::error_code ec;
+                for (fs::directory_iterator it(dir, ec), end2; it != end2; it.increment(ec))
+                    if (!ec && it->is_regular_file(ec))
+                        before.push_back(it->path().filename().string());
+            }
+            ClickDownloadWithConfirm();
+            got = WaitForNewFiles(before, dataTag + "_" + std::string(seq), 20000);
+            if (got.empty())
+                LogPageMessages();
+        }
+        if (got.empty())
+            spdlog::warn("[BCB] 第 {}/{} 行未捕获到下载文件", k + 1, n);
+        else
+            saved.insert(saved.end(), got.begin(), got.end());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
+
+    // 3) 轮末兜底：捕捉落盘晚于行内等待窗的文件（不在轮次基线且未被认领）
+    {
+        std::set<std::string> claimed;
+        for (auto& f : saved) claimed.insert(fs::path(f).filename().string());
+        std::string dir = DownloadDir();
+        std::error_code ec;
+        for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            std::string fn = it->path().filename().string();
+            if (roundBaseline.count(fn) || claimed.count(fn)) continue;
+            if (fn.size() >= 13 && fn.substr(fn.size() - 13) == ".crdownload") continue;
+            if (fn.size() > 5 && fn.substr(fn.size() - 5) == ".json") continue;
+            if (it->file_size(ec) == 0) continue;
+            spdlog::info("[BCB] 兜底捕获晚落盘文件: {}", fn);
+            saved.push_back(it->path().string());
+            claimed.insert(fn);
+        }
+    }
+
+    spdlog::info("[BCB] 逐条下载完成: {} 个文件 / {} 行", saved.size(), n);
+    return saved;
+}
+
 bool BCBPlugin::ClickButtonByText(const std::string& text) {
     std::string lit = nlohmann::json(text).dump();  // 安全转义（中文转 \uXXXX）
     // 只点击"可见"按钮，避开隐藏弹窗/筛选区里的同名按钮（如"确认"）
@@ -543,6 +860,30 @@ std::string BCBPlugin::DumpTablesJson() {
         var arr=[];for(var c of cs)arr.push((c.innerText||'').trim());data.push(arr);}
         out.push({rowCount:rows.length,data:data});}return JSON.stringify(out);})()
     )");
+}
+
+// 读取页面上的银行提示（el-message / el-message-box / el-dialog 正文）写日志，
+// 用于诊断"下载没反应/生成失败"之类的页面反馈
+void BCBPlugin::LogPageMessages() {
+    std::string js = R"(
+        (function(){
+        var parts=[];
+        function grab(sel){var es=document.querySelectorAll(sel);
+        for(var e of es){var t=(e.innerText||'').trim();
+        if(t&&t.length<200&&parts.indexOf(t)<0)parts.push(t);}}
+        grab('.el-message');
+        grab('.el-message-box__message');
+        grab('.el-message-box__wrapper');
+        grab('.el-dialog__body');
+        grab('.el-notification__title');
+        grab('.el-notification__content');
+        return parts.join(' || ');
+        })()";
+    std::string r = EvalStr(js);
+    if (!r.empty())
+        spdlog::info("[BCB] 页面提示: {}", r);
+    else
+        spdlog::info("[BCB] 页面提示: (无弹窗/消息)");
 }
 
 void BCBPlugin::ClickDownloadWithConfirm() {
@@ -754,8 +1095,8 @@ static std::vector<std::string> SnapshotDownloadDir(const std::string& dir) {
     return r;
 }
 
-std::string BCBPlugin::RunAllAccounts() {
-    if (!loggedIn_) Login();
+std::string BCBPlugin::RunAllAccountsImpl() {
+    if (!loggedIn_) LoginImpl();
     if (!loggedIn_) return "login-failed";
 
     EnableNativeDownloads();
@@ -1152,7 +1493,7 @@ std::string BCBPlugin::ScrapeTableJson() {
 // ----------------------------------------------------------------------------
 // Login — 核心登录流程
 // ----------------------------------------------------------------------------
-std::string BCBPlugin::Login() {
+std::string BCBPlugin::LoginImpl() {
     if (!session_ || !browser_) return "error: session not ready";
     if (loggedIn_) return "already logged in";
 
@@ -1161,7 +1502,7 @@ std::string BCBPlugin::Login() {
         : cfg_.loginUrl;
 
     // 查询版与演示版是完全不同的流程（账号+密码+顶象滑块 vs 企业+证书+登录密码）
-    if (url.find("version=query") != std::string::npos) {
+    if (variant_->UseQueryLogin()) {
         spdlog::info("[BCB] 查询版登录入口");
         return LoginQuery();
     }
@@ -1405,18 +1746,15 @@ std::string BCBPlugin::Login() {
 // ----------------------------------------------------------------------------
 // GetCurBal — 当日余额查询（下载方式优先）
 // ----------------------------------------------------------------------------
-std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBal() {
-    if (!loggedIn_) { Login(); }
+std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBalImpl() {
+    if (!loggedIn_) { LoginImpl(); }
     if (!loggedIn_) return {};
 
     std::string today = util::TodayStr();
     std::vector<std::string> files;
     // 演示版：路由直连 + 原生下载（Python CDP 脚本已验证）
     // 查询版：页面相同，但需设置日期（YYYYMMDD）+ origin 不带端口
-    if (IsQueryVersion())
-        files = DoQueryExport("AM/AM1/TAM1A01", today, today, "01_余额");
-    else
-        files = DoExport("AM/AM1/TAM1A01", "01_余额");
+    files = variant_->ExportBalance(*this, today);
 
     std::vector<std::map<std::string, std::string>> result;
     // 从表格数据还原行
@@ -1445,28 +1783,25 @@ std::vector<std::map<std::string, std::string>> BCBPlugin::GetCurBal() {
 // ----------------------------------------------------------------------------
 // GetCurTran — 当日交易（等同 GetHisTran(today, today)）
 // ----------------------------------------------------------------------------
-std::vector<plugin::Transaction> BCBPlugin::GetCurTran() {
-    if (!loggedIn_) { Login(); }
-    return GetHisTran({util::TodayStr(), util::TodayStr()});
+std::vector<plugin::Transaction> BCBPlugin::GetCurTranImpl() {
+    if (!loggedIn_) { LoginImpl(); }
+    return GetHisTranImpl({util::TodayStr(), util::TodayStr()});
 }
 
 // ----------------------------------------------------------------------------
 // GetHisTran — 历史交易（下载优先，DOM fallback）
 // ----------------------------------------------------------------------------
-std::vector<plugin::Transaction> BCBPlugin::GetHisTran(
+std::vector<plugin::Transaction> BCBPlugin::GetHisTranImpl(
     const plugin::DateRange& range) {
 
-    if (!loggedIn_) { Login(); }
+    if (!loggedIn_) { LoginImpl(); }
     if (!loggedIn_) return {};
 
     // 当日与历史走同一明细页，用日期区间区分 tag
     bool isToday = (range.begin == range.end);
     std::string tag = isToday ? "02_当日交易" : "03_历史交易";
     std::vector<std::string> files;
-    if (IsQueryVersion())
-        files = DoQueryExport("AM/AM2/TAM2A01", range.begin, range.end, tag);
-    else
-        files = DoExport("AM/AM2/TAM2A01", tag);
+    files = variant_->ExportTransactions(*this, range, tag);
 
     std::vector<plugin::Transaction> result;
     fs::path jp = fs::path(DownloadDir()) / (tag + "_data.json");
@@ -1524,22 +1859,38 @@ std::vector<plugin::Transaction> BCBPlugin::GetHisTran(
 //   2. 填查询条件（日期 / 账号）
 //   3. 查询 → 点"下载/打印/回单"按钮 → Network 拦截 PDF
 // ----------------------------------------------------------------------------
-std::vector<std::string> BCBPlugin::DownBankSlip(
+std::vector<std::string> BCBPlugin::DownBankSlipImpl(
     const plugin::DateRange& range) {
 
     std::vector<std::string> saved;
-    if (!loggedIn_) { Login(); }
+    if (!loggedIn_) { LoginImpl(); }
     if (!loggedIn_) return saved;
 
     // 演示版电子回单：勾选 → 生成回单 → 选方式一 → 确认 → 下载
     // 查询版：页面相同，需设置日期（YYYYMMDD）+ origin 不带端口
-    if (IsQueryVersion())
-        saved = DoQueryExport("AM/AM3/NAM3001", range.begin, range.end,
-                              "04_电子回单", /*receipt=*/true);
-    else
-        saved = DoExport("AM/AM3/NAM3001", "04_电子回单", /*receipt=*/true);
+    saved = variant_->ExportReceipts(*this, range);
 
     spdlog::info("[BCB] DownBankSlip: {} file(s) saved", saved.size());
+
+    // 解压回单 ZIP，并建立「PDF 文件 ←→ data.json 行」的一一对应索引
+    // （银行 PDF 文件名是内部回单号，页面表格里没有该字段，只能靠顺序 + 日期校验绑定）
+    if (!saved.empty()) {
+        const std::string tag = "04_电子回单";
+        newrpa::io::slip::SlipIndexResult r;
+        std::string err;
+        if (newrpa::io::slip::BuildFromDownloads(saved, DownloadDir(), tag, &r, &err)) {
+            spdlog::info("[BCB] 回单解压: {} 个 PDF / {} 行数据, 日期匹配 {}/{}, allMatched={}",
+                         r.pdfCount, r.rowCount, r.matchedCount, r.pdfCount,
+                         r.allMatched ? "true" : "false");
+            spdlog::info("[BCB] 回单 PDF 目录: {}", r.pdfDir);
+            spdlog::info("[BCB] 回单索引: {}", r.indexPath);
+            if (!r.allMatched)
+                spdlog::warn("[BCB] 回单与数据未完全一一对应（PDF {} / 行 {}），详见 {}",
+                             r.pdfCount, r.rowCount, r.indexPath);
+        } else {
+            spdlog::warn("[BCB] 回单解压/建索引失败: {}", err);
+        }
+    }
     return saved;
 }
 
@@ -1547,7 +1898,7 @@ std::vector<std::string> BCBPlugin::DownBankSlip(
 // 桩函数
 // ----------------------------------------------------------------------------
 
-std::string BCBPlugin::Payment(
+std::string BCBPlugin::PaymentImpl(
     const std::string& amount, const std::string& nums,
     const std::string& paccno, const std::string& filename,
     const std::string& sn) {
@@ -1555,12 +1906,12 @@ std::string BCBPlugin::Payment(
     return "stub";
 }
 
-std::string BCBPlugin::Approval(const std::string& no) {
+std::string BCBPlugin::ApprovalImpl(const std::string& no) {
     spdlog::warn("[BCB] Approval stub");
     return "stub";
 }
 
-std::string BCBPlugin::Query(const std::string& no) {
+std::string BCBPlugin::QueryImpl(const std::string& no) {
     spdlog::warn("[BCB] Query stub");
     return "stub";
 }
@@ -1579,12 +1930,12 @@ std::string BCBPlugin::Query(const std::string& no) {
 //     3) 用 HttpDownloader（WinHTTP/schannel）纯 HTTP 下载并落盘
 //     4) 统计每条流水的笔数，返回摘要
 // ----------------------------------------------------------------------------
-std::string BCBPlugin::HttpDirect() {
+std::string BCBPlugin::HttpDirectImpl() {
     std::ostringstream summary;
     summary << "=== BCB HTTP 直连 (CDP 登录 + HTTP 取数) ===\n";
 
     // 1) CDP 登录建会话（用户要求：登录仍走 RPA）
-    std::string login = Login();
+    std::string login = LoginImpl();
     summary << "登录: " << login << "\n";
     if (login != "ok" && login != "already logged in") {
         summary << "登录失败，终止。\n";
@@ -1677,8 +2028,6 @@ namespace newrpa {
 namespace bcb {
 namespace {
 
-struct GapCand { int x, y; double score; };
-
 // 找最大的可见 Chrome 窗口（与 KLB 同款）
 // 注意：VS Code 等 Electron 应用类名也是 Chrome_WidgetWin_1，
 // 必须按进程名过滤出真正的 chrome.exe，否则会把 VS Code 置顶最大化。
@@ -1716,10 +2065,41 @@ HWND FindBcbChromeWindow() {
     return ctx.best;
 }
 
+// 兜底：把 VSCode(Code.exe) 的置顶状态摘掉。
+// VSCode 是 Electron，窗口类名同样是 Chrome_WidgetWin_1；旧逻辑曾误把它
+// 置顶，而 WS_EX_TOPMOST 是持久样式，不主动清除会一直盖住其它窗口，
+// 让用户以为「打开 VSCode 就置顶」，还会抢走调试时的焦点。
+void UnpinVsCodeTopmost() {
+    EnumWindows([](HWND h, LPARAM)->BOOL {
+        if (!IsWindowVisible(h)) return TRUE;
+        LONG ex = GetWindowLongW(h, GWL_EXSTYLE);
+        if (!(ex & WS_EX_TOPMOST)) return TRUE;
+        wchar_t cls[128] = {0};
+        GetClassNameW(h, cls, 128);
+        if (wcsstr(cls, L"Chrome_WidgetWin_1") == nullptr) return TRUE;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hp) return TRUE;
+        wchar_t exe[MAX_PATH] = {0};
+        DWORD len = MAX_PATH;
+        BOOL ok = QueryFullProcessImageNameW(hp, 0, exe, &len);
+        CloseHandle(hp);
+        if (!ok) return TRUE;
+        const wchar_t* base = wcsrchr(exe, L'\\');
+        base = base ? base + 1 : exe;
+        if (_wcsicmp(base, L"Code.exe") != 0) return TRUE;
+        SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return TRUE;
+    }, 0);
+}
+
 // 登录前把 Chrome 最大化 + 置顶 + 前置。
 // 置顶(HWND_TOPMOST)：硬件键盘/滑块期间不被别的窗口盖住；
 // 最大化(SW_MAXIMIZE)：页面元素位置稳定，滑块标定/点击坐标不因窗口大小漂移。
 bool FocusBcbChromeWindow() {
+    UnpinVsCodeTopmost();   // 先把可能被误置顶的 VSCode 摘下来
     HWND h = FindBcbChromeWindow();
     if (!h) return false;
     // 先确保不是最小化状态，再最大化 + 置顶（即使已在前台也要执行）
@@ -1741,287 +2121,18 @@ bool FocusBcbChromeWindow() {
     return GetForegroundWindow() == h;
 }
 
-// GDI+ 解码 PNG -> 灰度（零第三方依赖，系统自带）
-bool DecodePngGray(const std::vector<uint8_t>& png, int& W, int& H,
-                   std::vector<uint8_t>& gray) {
-    W = H = 0; gray.clear();
-    if (png.size() < 8) return false;
-    Gdiplus::GdiplusStartupInput si;
-    ULONG_PTR tok = 0;
-    if (Gdiplus::GdiplusStartup(&tok, &si, nullptr) != Gdiplus::Ok) return false;
-    bool ok = false;
-    do {
-        HGLOBAL hg = ::GlobalAlloc(GMEM_MOVEABLE, png.size());
-        if (!hg) break;
-        void* p = ::GlobalLock(hg);
-        if (!p) { ::GlobalFree(hg); break; }
-        memcpy(p, png.data(), png.size());
-        ::GlobalUnlock(hg);
-        IStream* st = nullptr;
-        if (CreateStreamOnHGlobal(hg, TRUE, &st) != S_OK) { ::GlobalFree(hg); break; }
-        Gdiplus::GpBitmap* bmp = nullptr;
-        UINT w = 0, h = 0;
-        if (Gdiplus::DllExports::GdipCreateBitmapFromStream(st, &bmp) == Gdiplus::Ok && bmp &&
-            Gdiplus::DllExports::GdipGetImageWidth(bmp, &w) == Gdiplus::Ok &&
-            Gdiplus::DllExports::GdipGetImageHeight(bmp, &h) == Gdiplus::Ok && w > 50 && h > 50) {
-            Gdiplus::BitmapData bd{};
-            Gdiplus::Rect rect(0, 0, (INT)w, (INT)h);
-            if (Gdiplus::DllExports::GdipBitmapLockBits(bmp, &rect, Gdiplus::ImageLockModeRead,
-                                   PixelFormat32bppARGB, &bd) == Gdiplus::Ok && bd.Scan0) {
-                gray.resize((size_t)w * h);
-                const uint8_t* base = (const uint8_t*)bd.Scan0;
-                INT stride = bd.Stride;
-                for (UINT y = 0; y < h; ++y) {
-                    const uint8_t* row = base + (size_t)y * stride;
-                    for (UINT x = 0; x < w; ++x) {
-                        const uint8_t* px = row + (size_t)x * 4;   // B G R A
-                        gray[(size_t)y * w + x] =
-                            (uint8_t)((px[0] * 29 + px[1] * 150 + px[2] * 77) >> 8);
-                    }
-                }
-                Gdiplus::DllExports::GdipBitmapUnlockBits(bmp, &bd);
-                W = (int)w; H = (int)h; ok = true;
-            }
-            Gdiplus::DllExports::GdipDisposeImage(bmp);
-        }
-        st->Release();
-    } while (false);
-    Gdiplus::GdiplusShutdown(tok);
-    return ok;
-}
-
-// 缺口候选：内环暗 vs 外环亮差值（Python candidates() 同款）
-std::vector<GapCand> GapCandidates(const std::vector<uint8_t>& gray, int W, int H) {
-    const int R = 26;
-    const int y_lo = 55, y_hi = std::min(H - 45, 150);
-    const int x_lo = 80, x_hi = W - 90;
-    const int step = 4;
-    std::vector<GapCand> best;
-    if (y_hi <= y_lo || x_hi <= x_lo) return best;
-    auto g = [&](int x, int y)->int {
-        if (x < 0 || y < 0 || x >= W || y >= H) return 128;
-        return gray[(size_t)y * W + x];
-    };
-    for (int cy = y_lo; cy < y_hi; cy += step) {
-        for (int cx = x_lo; cx < x_hi; cx += step) {
-            double isum = 0; int icnt = 0;
-            for (int y = cy - R + 5; y <= cy + R - 4; y += 4)
-                for (int x = cx - R + 5; x <= cx + R - 4; x += 4)
-                    { isum += g(x, y); ++icnt; }
-            double rsum = 0; int rcnt = 0;
-            for (int y = cy - R - 3; y <= cy + R + 3; y += 4)
-                for (int x = cx - R - 3; x <= cx + R + 3; x += 4) {
-                    if (std::abs(x - cx) > R - 2 || std::abs(y - cy) > R - 2)
-                        { rsum += g(x, y); ++rcnt; }
-                }
-            if (!icnt || !rcnt) continue;
-            best.push_back({cx, cy, rsum / rcnt - isum / icnt});
-        }
-    }
-    std::sort(best.begin(), best.end(),
-              [](const GapCand& a, const GapCand& b) { return a.score > b.score; });
-    std::vector<GapCand> picks;
-    for (auto& b : best) {
-        bool dup = false;
-        for (auto& q : picks) if (std::abs(b.x - q.x) <= 38) { dup = true; break; }
-        if (!dup) picks.push_back(b);
-        if (picks.size() >= 6) break;
-    }
-    std::vector<GapCand> out;
-    for (auto& p : picks)
-        if (p.x >= x_lo && p.x <= x_hi) out.push_back(p);
-    std::sort(out.begin(), out.end(),
-              [](const GapCand& a, const GapCand& b) { return a.x < b.x; });
-    if (out.size() > 4) out.resize(4);
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// 外形一致匹配（顶象滑块「两个缺口选一个」的正确解法）
-//   拼图块是一张独立远程 PNG（.dx_captcha_basic_sub-slider img，带 alpha），
-//   背景 canvas 上画着 2 个半透明缺口，只有一个与拼图块外形一致。
-//   做法：提取拼图块 alpha 形状掩膜（相对中心的点集），盖到每个候选缺口中心，
-//   统计落在「局部暗区」的点比例 —— 命中率最高的即外形一致的真缺口。
-//   实测：真缺口命中率 ~0.52，干扰缺口 ~0.06，区分度极高。
-// ---------------------------------------------------------------------------
-
-// GDI+ 解码 PNG -> ARGB（保留 alpha，用于拼图块形状掩膜）
-bool DecodePngARGB(const std::vector<uint8_t>& png, int& W, int& H,
-                   std::vector<uint32_t>& argb) {
-    W = H = 0; argb.clear();
-    if (png.size() < 8) return false;
-    Gdiplus::GdiplusStartupInput si;
-    ULONG_PTR tok = 0;
-    if (Gdiplus::GdiplusStartup(&tok, &si, nullptr) != Gdiplus::Ok) return false;
-    bool ok = false;
-    do {
-        HGLOBAL hg = ::GlobalAlloc(GMEM_MOVEABLE, png.size());
-        if (!hg) break;
-        void* p = ::GlobalLock(hg);
-        if (!p) { ::GlobalFree(hg); break; }
-        memcpy(p, png.data(), png.size());
-        ::GlobalUnlock(hg);
-        IStream* st = nullptr;
-        if (CreateStreamOnHGlobal(hg, TRUE, &st) != S_OK) { ::GlobalFree(hg); break; }
-        Gdiplus::GpBitmap* bmp = nullptr;
-        UINT w = 0, h = 0;
-        if (Gdiplus::DllExports::GdipCreateBitmapFromStream(st, &bmp) == Gdiplus::Ok && bmp &&
-            Gdiplus::DllExports::GdipGetImageWidth(bmp, &w) == Gdiplus::Ok &&
-            Gdiplus::DllExports::GdipGetImageHeight(bmp, &h) == Gdiplus::Ok && w > 8 && h > 8) {
-            Gdiplus::BitmapData bd{};
-            Gdiplus::Rect rect(0, 0, (INT)w, (INT)h);
-            if (Gdiplus::DllExports::GdipBitmapLockBits(bmp, &rect, Gdiplus::ImageLockModeRead,
-                                   PixelFormat32bppARGB, &bd) == Gdiplus::Ok && bd.Scan0) {
-                argb.resize((size_t)w * h);
-                const uint8_t* base = (const uint8_t*)bd.Scan0;
-                INT stride = bd.Stride;
-                for (UINT y = 0; y < h; ++y) {
-                    const uint8_t* row = base + (size_t)y * stride;
-                    for (UINT x = 0; x < w; ++x) {
-                        const uint8_t* px = row + (size_t)x * 4;   // B G R A
-                        uint32_t a = px[3];
-                        uint32_t gv = (px[0] * 29 + px[1] * 150 + px[2] * 77) >> 8;
-                        argb[(size_t)y * w + x] = (a << 24) | (gv << 16) | (gv << 8) | gv;
-                    }
-                }
-                Gdiplus::DllExports::GdipBitmapUnlockBits(bmp, &bd);
-                W = (int)w; H = (int)h; ok = true;
-            }
-            Gdiplus::DllExports::GdipDisposeImage(bmp);
-        }
-        st->Release();
-    } while (false);
-    Gdiplus::GdiplusShutdown(tok);
-    return ok;
-}
-
-// 拼图块 alpha 掩膜：返回相对形状中心的点集 (dx,dy)（alpha>=128 的实心像素）
-struct ShapeMask {
-    std::vector<std::pair<int,int>> pts;      // 实心点，相对中心偏移
-    std::vector<std::pair<int,int>> outline;  // 轮廓点（实心且邻域有透明），用于边缘匹配
-    int radius = 0;                           // 覆盖半径（像素）
-};
-ShapeMask BuildShapeMask(const std::vector<uint32_t>& argb, int W, int H) {
-    ShapeMask sm;
-    int x0 = W, x1 = -1, y0 = H, y1 = -1;
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x) {
-            uint32_t a = (argb[(size_t)y * W + x] >> 24) & 0xFF;
-            if (a >= 128) {
-                if (x < x0) x0 = x; if (x > x1) x1 = x;
-                if (y < y0) y0 = y; if (y > y1) y1 = y;
-            }
-        }
-    if (x1 < x0) return sm;
-    int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-    auto alpha = [&](int x, int y)->int {
-        if (x < 0 || y < 0 || x >= W || y >= H) return 0;
-        return (int)((argb[(size_t)y * W + x] >> 24) & 0xFF);
-    };
-    for (int y = y0; y <= y1; ++y)
-        for (int x = x0; x <= x1; ++x) {
-            if (alpha(x, y) < 128) continue;
-            sm.pts.push_back({x - cx, y - cy});
-            // 轮廓点：4 邻域任一透明，即为形状边缘
-            if (alpha(x - 1, y) < 128 || alpha(x + 1, y) < 128 ||
-                alpha(x, y - 1) < 128 || alpha(x, y + 1) < 128)
-                sm.outline.push_back({x - cx, y - cy});
-        }
-    sm.radius = std::max(x1 - x0, y1 - y0) / 2;
-    return sm;
-}
-
-// Sobel 边缘强度图（背景 canvas 灰度 -> 每点梯度幅值 0~255）
-std::vector<uint8_t> SobelEdges(const std::vector<uint8_t>& gray, int W, int H) {
-    std::vector<uint8_t> e((size_t)W * H, 0);
-    auto g = [&](int x, int y)->int {
-        if (x < 0 || y < 0 || x >= W || y >= H) return 0;
-        return gray[(size_t)y * W + x];
-    };
-    for (int y = 1; y < H - 1; ++y)
-        for (int x = 1; x < W - 1; ++x) {
-            int gx = -g(x-1,y-1) - 2*g(x-1,y) - g(x-1,y+1)
-                     + g(x+1,y-1) + 2*g(x+1,y) + g(x+1,y+1);
-            int gy = -g(x-1,y-1) - 2*g(x,y-1) - g(x+1,y-1)
-                     + g(x-1,y+1) + 2*g(x,y+1) + g(x+1,y+1);
-            int m = (std::abs(gx) + std::abs(gy)) / 2;
-            e[(size_t)y * W + x] = (uint8_t)std::min(255, m);
-        }
-    return e;
-}
-
-// 边缘匹配：把拼图块轮廓点平移到候选中心，统计落在背景强边缘上的比例。
-// 真缺口的边界形状与拼图块轮廓一致，命中率显著高于干扰缺口。
-double ShapeEdgeScore(const std::vector<uint8_t>& edge, int W, int H,
-                      const ShapeMask& sm, int cx, int cy) {
-    if (sm.outline.empty()) return 0.0;
-    int hit = 0, total = 0;
-    for (const auto& pt : sm.outline) {
-        int x = cx + pt.first, y = cy + pt.second;
-        if (x < 3 || y < 3 || x >= W - 3 || y >= H - 3) continue;
-        int mx = 0;
-        for (int dy = -2; dy <= 2; ++dy)
-            for (int dx = -2; dx <= 2; ++dx)
-                mx = std::max(mx, (int)edge[(size_t)(y + dy) * W + (x + dx)]);
-        ++total;
-        if (mx >= 30) ++hit;   // 梯度阈值：明显边缘
-    }
-    return total ? (double)hit / total : 0.0;
-}
-
-// 计算某个候选中心处，拼图块形状掩膜覆盖区域的「暗区命中率」
-double ShapeDarknessScore(const std::vector<uint8_t>& gray, int W, int H,
-                          const ShapeMask& sm, int cx, int cy) {
-    if (sm.pts.empty()) return 0.0;
-    auto g = [&](int x, int y)->int {
-        if (x < 0 || y < 0 || x >= W || y >= H) return -1;
-        return gray[(size_t)y * W + x];
-    };
-    int hit = 0, total = 0;
-    const int LR = 15;   // 局部均值窗口
-    for (const auto& pt : sm.pts) {
-        int x = cx + pt.first, y = cy + pt.second;
-        int v = g(x, y);
-        if (v < 0) continue;
-        long long sum = 0; int n = 0;
-        for (int yy = y - LR; yy <= y + LR; yy += 3)
-            for (int xx = x - LR; xx <= x + LR; xx += 3) {
-                int lv = g(xx, yy);
-                if (lv >= 0) { sum += lv; ++n; }
-            }
-        if (!n) continue;
-        int localMean = (int)(sum / n);
-        ++total;
-        if (localMean - v > 18) ++hit;   // 明显暗于局部均值 = 落在缺口阴影内
-    }
-    return total ? (double)hit / total : 0.0;
-}
-
-// 从候选中选出目标缺口（返回下标；-1 表示无拼图块信息，退化用亮度差分最高分）。
-// 主判据=边缘匹配（拼图块轮廓落在背景强边缘上的比例，不受背景明暗干扰）；
-// 暗区命中率仅作辅助加分，二者融合：score = 0.75*edge + 0.25*dark。
-int PickShapeMatchedGap(const std::vector<GapCand>& cands,
-                        const std::vector<uint8_t>& gray, int W, int H,
-                        const ShapeMask& sm, double& outScore) {
-    outScore = 0.0;
-    if (cands.empty() || sm.pts.empty()) return -1;
-    std::vector<uint8_t> edge = sm.outline.empty()
-        ? std::vector<uint8_t>() : SobelEdges(gray, W, H);
-    int best = -1; double bestScore = -1.0;
-    for (int i = 0; i < (int)cands.size(); ++i) {
-        double dark = ShapeDarknessScore(gray, W, H, sm, cands[i].x, cands[i].y);
-        double es = edge.empty() ? 0.0
-            : ShapeEdgeScore(edge, W, H, sm, cands[i].x, cands[i].y);
-        double sc = 0.75 * es + 0.25 * dark;
-        spdlog::info("[BCB] 候选缺口 x={} 边缘命中={:.3f} 暗区命中={:.3f} 融合={:.3f}",
-                     cands[i].x, es, dark, sc);
-        if (sc > bestScore) { bestScore = sc; best = i; }
-    }
-    outScore = bestScore;
-    return best;
-}
 
 } // namespace
+
+// 收尾：取消 Chrome 置顶（登录前置顶后必须恢复，否则一直压住 VSCode 等窗口）。
+// 放在匿名 namespace 之后，才能复用上面的 FindBcbChromeWindow / UnpinVsCodeTopmost。
+// 同时把误置顶的 VSCode 一并摘掉，保证异常路径下也不残留 TOPMOST。
+void BCBPlugin::UnpinBcbChromeTopmost() {
+    HWND h = FindBcbChromeWindow();
+    if (h) SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    UnpinVsCodeTopmost();
+}
 
 // ----------------------------------------------------------------------------
 // 盒子键盘拟人输入（IME 隔离 + 字间随机停顿 + 长顿）
@@ -2047,13 +2158,13 @@ bool BCBPlugin::HardwareType(const std::string& text, int delayMs) {
         Sleep(200);
     }
 
-    SkKeyBoard kb;
+    HidKeyBoard kb;
     kb.setImeIsolation(true);
     kb.setKeyDelay(delayMs);
-    auto st = SkKeyBoard::detect();
+    auto st = HidKeyBoard::detect();
     spdlog::info("[BCB] HW keyboard: usable={} detail={}", st.usable, st.detail);
     if (!kb.open()) {
-        spdlog::error("[BCB] SkKeyBoard open failed: {}", kb.lastError());
+        spdlog::error("[BCB] HidKeyBoard open failed: {}", kb.lastError());
         return false;
     }
     // 拟人：字间随机停顿，每 2~4 字一次"想一想"长顿
@@ -2114,298 +2225,7 @@ bool BCBPlugin::CalibrateBoxOrigin(HidMouse& m) {
     return true;
 }
 
-double BCBPlugin::CalibrateGain(HidMouse& m) {
-    m.moveRel(5, 0); Sleep(150);          // 预热丢弃首步非线性
-    std::vector<double> gs;
-    for (int i = 0; i < 3; ++i) {
-        int x0, y0; HidMouse::currentPos(x0, y0); Sleep(60);
-        m.moveRel(20, 0); Sleep(160);
-        int x1, y1; HidMouse::currentPos(x1, y1);
-        gs.push_back(std::abs(x1 - x0) / 20.0);
-    }
-    std::sort(gs.begin(), gs.end());
-    double g = (gs.size() == 3) ? gs[1] : (gs.empty() ? 2.47 : gs.back());
-    if (g <= 0.5) g = 2.47;
-    spdlog::info("[BCB] rel gain={:.3f}", g);
-    return g;
-}
 
-// ----------------------------------------------------------------------------
-// 拟人平滑拖动轨迹
-//
-// 顶象拒绝的真正原因不是缺口选错，而是轨迹被判机器：
-//   * 旧实现每帧 m.drain() 内含 Sleep(15)+Sleep(12)，8ms 时间轴被拉成 27ms+
-//     一顿一顿的，页面看到的 mousemove 是稀疏跳变；
-//   * gain≈2.0，每帧位移取整后经常为 0，进一步减少事件数；
-//   * 到位后 trim 产生反向回拉，是行为模型最敏感的机器特征。
-//
-// 新实现：
-//   * 11ms/帧（≈90Hz，真人鼠标常见采样率），drainFast 无 Sleep；
-//   * 每帧 GetCursorPos 闭环，把固件偶发重复帧当手抖吸收；
-//   * 速度曲线 tau + 0.32*tau*(1-tau)：起步略快、末端减速；
-//   * OU 噪声在最后 25% 衰减到 0，终点精确、无需反向回拉；
-//   * 记录实际帧数/耗时/事件数，便于下次定位。
-// ----------------------------------------------------------------------------
-bool BCBPlugin::TrackRel(HidMouse& m, double dxCss, double dyCss, double T,
-                         double gain, const char* label) {
-    const double dt = 0.011;
-    int N = std::max(14, (int)(T / dt));
-    N = std::min(N, 110);
-    const double scale = m.scale();
-    int x0, y0; HidMouse::currentPos(x0, y0);
-    const double tx = x0 + dxCss * scale, ty = y0 + dyCss * scale;
-    static thread_local std::mt19937 rng{std::random_device{}()};
-    std::normal_distribution<double> gauss(0.0, 1.0);
-    double nx = 0, ny = 0;
-    int events = 0;
-    auto t0 = std::chrono::steady_clock::now();
-    for (int i = 1; i <= N; ++i) {
-        double tau = (double)i / N;
-        // 起步略快、末端减速（s(0)=0, s(1)=1）
-        double s = tau + 0.32 * tau * (1.0 - tau);
-        // OU 手抖，末端 25% 线性衰减到 0，保证终点不飘
-        nx += -9.0 * nx * dt + 3.0 * std::sqrt(dt) * gauss(rng);
-        ny += -9.0 * ny * dt + 4.2 * std::sqrt(dt) * gauss(rng);
-        double nw = (tau < 0.75) ? 1.0 : (1.0 - (tau - 0.75) / 0.25);
-        double wantX = x0 + (dxCss * s + nx * nw) * scale;
-        double wantY = y0 + (dyCss * s + ny * nw) * scale;
-
-        // 每帧基于真实光标位置闭环（不是累积期望值）
-        int px, py; HidMouse::currentPos(px, py);
-        int sx = (int)std::lround((wantX - px) / gain);
-        int sy = (int)std::lround((wantY - py) / gain);
-        sx = std::max(-24, std::min(24, sx));
-        sy = std::max(-18, std::min(18, sy));
-        if (sx || sy) {
-            m.moveRel(sx, sy);
-            m.drainFast();
-            ++events;
-        }
-        while (std::chrono::duration<double>(
-                   std::chrono::steady_clock::now() - t0).count() < i * dt) {
-            Sleep(0);
-        }
-    }
-    int px, py; HidMouse::currentPos(px, py);
-    double ex = (tx - px) / scale, ey = (ty - py) / scale;
-    double actual = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t0).count();
-    spdlog::info("[BCB] track[{}] D=({:.1f},{:.1f})css T={:.2f}s frames={} events={} "
-                 "actual={:.2f}s residual=({:.1f},{:.1f})",
-                 label, dxCss, dyCss, T, N, events, actual, ex, ey);
-    return std::abs(ex) < 6 && std::abs(ey) < 6;
-}
-
-// ----------------------------------------------------------------------------
-// 顶象滑块一轮自动尝试。返回空串 = 通过；否则失败原因
-// ----------------------------------------------------------------------------
-std::string BCBPlugin::SliderAttempt(HidMouse& m) {
-    auto readSubMl = [&] {
-        return EvalNum(
-            "(function(){var s=document.querySelector('.dx_captcha_basic_sub-slider');"
-            "return s?(parseFloat(getComputedStyle(s).marginLeft)||0):-1})()");
-    };
-    auto readSliderMl = [&] {
-        return EvalNum(
-            "(function(){var s=document.querySelector('.dx_captcha_basic_slider');"
-            "return s?(parseFloat(getComputedStyle(s).marginLeft)||0):-1})()");
-    };
-
-    // 1 定位滑块按钮
-    std::string s = EvalStr(
-        "(function(){var r=document.querySelector('.dx_captcha_basic_slider');"
-        "if(!r)return '{}';var b=r.getBoundingClientRect();"
-        "return JSON.stringify({x:b.x,y:b.y,w:b.width,h:b.height});})()");
-    if (s.empty() || s == "{}") return "slider-not-found";
-    double sx = 0, sy = 0;
-    try {
-        auto j = nlohmann::json::parse(s);
-        sx = j["x"].get<double>() + j["w"].get<double>() / 2;
-        sy = j["y"].get<double>() + j["h"].get<double>() / 2;
-    } catch (...) { return "slider-parse-failed"; }
-
-    if (!CalibrateBoxOrigin(m)) return "origin-failed";
-    double gain = CalibrateGain(m);
-
-    ShapeMask pieceMask;   // 起手后拼图块完全显示再抓（见 5b）
-
-    // 2 自然移入（运动学轨迹），再闭环精调、按下
-    int cx0, cy0; HidMouse::currentPos(cx0, cy0);
-    double curX = (cx0 - m.originX()) / m.scale();
-    double curY = (cy0 - m.originY()) / m.scale();
-    double dx = sx - curX, dy = sy - curY;
-    double Din = std::sqrt(dx * dx + dy * dy);
-    TrackRel(m, dx, dy, std::max(0.35, std::min(0.75, 0.22 + 0.004 * Din)), gain, "approach");
-    m.releaseAll(); Sleep(150);
-    m.moveTo((int)m.cssToPhysX(sx), (int)m.cssToPhysY(sy)); Sleep(300);
-    m.leftDown(); Sleep(200);
-
-    // 3 起手 55px（触发 canvas 显示）
-    TrackRel(m, 55.0, 0.0, 0.46, gain, "takeoff");
-    Sleep(50);
-
-    // 4 读几何（触发前父容器 display:none，rect 全 0，必须在起手后读）
-    std::string geo = EvalStr(
-        "(function(){"
-        "var bg=document.querySelector('.dx_captcha_basic_bg');"
-        "var cv=document.querySelector('.dx_captcha_basic_bg canvas');"
-        "var sub=document.querySelector('.dx_captcha_basic_sub-slider');"
-        "if(!bg||!cv||!sub)return '{}';"
-        "var cr=cv.getBoundingClientRect(),sr=sub.getBoundingClientRect();"
-        "return JSON.stringify({cvW:cv.width,cvH:cv.height,"
-        "cvCssW:cr.width,cvCssH:cr.height,"
-        "subLeft:parseFloat(getComputedStyle(sub).left)||0,"
-        "subW:sr.width,"
-        "subMl:parseFloat(getComputedStyle(sub).marginLeft)||0});})()");
-    double cvW = 0, cvCssW = 0, subLeft = 0, subW = 0, subMl0 = 0;
-    try {
-        auto j = nlohmann::json::parse(geo);
-        cvW = j["cvW"].get<double>();      cvCssW = j["cvCssW"].get<double>();
-        subLeft = j["subLeft"].get<double>(); subW = j["subW"].get<double>();
-        subMl0 = j["subMl"].get<double>();
-    } catch (...) { m.leftUp(); return "geo-failed"; }
-    if (cvW < 100 || cvCssW < 50) { m.leftUp(); return "puzzle-not-shown"; }
-    double KX = cvCssW / cvW;
-    double startCenter = subLeft + subW / 2;
-    spdlog::info("[BCB] KX={:.4f} start_center={:.1f} subMl0={:.1f}", KX, startCenter, subMl0);
-
-    // 5 抓 canvas -> 缺口候选
-    std::string dataUrl = EvalStr(
-        "(function(){var c=document.querySelector('.dx_captcha_basic_bg canvas');"
-        "return (c && c.width>100) ? c.toDataURL('image/png') : '';})()");
-    const std::string kPrefix = "data:image/png;base64,";
-    if (dataUrl.size() <= kPrefix.size()) { m.leftUp(); return "canvas-capture-failed"; }
-    auto png = util::Base64Decode(dataUrl.substr(kPrefix.size()));
-    int W = 0, H = 0; std::vector<uint8_t> gray;
-    if (!DecodePngGray(png, W, H, gray)) { m.leftUp(); return "png-decode-failed"; }
-    auto cands = GapCandidates(gray, W, H);
-    if (cands.empty()) { m.leftUp(); return "no-gap-candidate"; }
-
-    // 5b 抓拼图块形状：必须在起手后抓——提前抓时拼图块还在入场动画/半透明，
-    //     轮廓只有 1425 点（完整应 ~2911），命中率会掉到 0.25 而选错缺口。
-    //     实测起手后 CORS Image 走缓存抓图仅 ~78ms，不构成明显静止。
-    {
-        std::string pieceDiag = EvalStrQ(
-            "(function(){var c=document.querySelector('.dx_captcha_basic_sub-slider img');"
-            "if(!c)return 'no-img';return JSON.stringify({complete:c.complete,"
-            "nw:c.naturalWidth,nh:c.naturalHeight,co:c.crossOrigin,"
-            "srcLen:(c.src||'').length})})()", 4000);
-        spdlog::info("[BCB] 拼图块 img 诊断: {}", pieceDiag);
-        std::string pieceUrl = EvalStrAsync(
-            "(function(){var c=document.querySelector('.dx_captcha_basic_sub-slider img');"
-            "if(!c)return Promise.resolve('');"
-            "return new Promise(function(res){"
-            "var im=new Image();im.crossOrigin='anonymous';"
-            "im.onload=function(){try{var cv=document.createElement('canvas');"
-            "cv.width=im.naturalWidth;cv.height=im.naturalHeight;"
-            "cv.getContext('2d').drawImage(im,0,0);res(cv.toDataURL('image/png'))}"
-            "catch(e){res('')}};"
-            "im.onerror=function(){res('')};"
-            "im.src=c.src})})()",
-            8000);
-        const std::string kPngPrefix = "data:image/png;base64,";
-        if (pieceUrl.size() > kPngPrefix.size()) {
-            auto piecePng = util::Base64Decode(pieceUrl.substr(kPngPrefix.size()));
-            int PW = 0, PH = 0; std::vector<uint32_t> argb;
-            if (DecodePngARGB(piecePng, PW, PH, argb)) {
-                pieceMask = BuildShapeMask(argb, PW, PH);
-                spdlog::info("[BCB] 拼图块 {}x{} 形状点={} 半径={}", PW, PH,
-                             pieceMask.pts.size(), pieceMask.radius);
-            }
-        }
-    }
-
-    // 5c 选缺口：有拼图块形状就按「外形一致」命中率挑，否则退回环形差分最高分
-    GapCand best = cands[0];
-    for (auto& c : cands) if (c.score > best.score) best = c;
-    if (!pieceMask.pts.empty()) {
-        double shapeScore = 0.0;
-        int idx = PickShapeMatchedGap(cands, gray, W, H, pieceMask, shapeScore);
-        if (idx >= 0 && shapeScore >= 0.10) {
-            best = cands[idx];
-            spdlog::info("[BCB] 边缘检测选缺口: ({},{}) 融合命中率={:.3f}",
-                         best.x, best.y, shapeScore);
-        } else {
-            spdlog::warn("[BCB] 外形匹配命中率过低({:.3f})，退回亮度差分", shapeScore);
-        }
-    } else {
-        spdlog::warn("[BCB] 未取到拼图块形状，使用亮度差分选缺口");
-    }
-    spdlog::info("[BCB] gap=({},{}) score={:.1f} cands={}", best.x, best.y, best.score, cands.size());
-
-    // 6 speed 标定（顶象随机 speed：subMl = speed x sliderMl）
-    double slMl = readSliderMl();
-    double speed = 1.0;
-    if (slMl > 6 && subMl0 > 2) speed = subMl0 / slMl;
-    spdlog::info("[BCB] speed_est={:.3f}", speed);
-
-    double targetSub = std::max(0.0, best.x * KX - startCenter);
-    // 旧的 "+35-30"（+5px）是历史遗留补偿，实测各轮过冲 -8.2/-3.0/+0.4 不一致，
-    // 固定值治标不治本。改成主拖留 6px 余量、宁欠勿过，到位后用 5b 闭环同向补齐。
-    double targetCss = std::max(0.0, targetSub / speed - 6.0);
-    spdlog::info("[BCB] target_sub={:.1f} target_css={:.1f} (留6px余量同向逼近)",
-                 targetSub, targetCss);
-
-    // 7 主拖（按住期间不查询，中途不留死尸段）
-    int cx1, cy1; HidMouse::currentPos(cx1, cy1);
-    double curCss = (cx1 - m.originX()) / m.scale() - sx;
-    double Dm = std::abs(targetCss - curCss);
-    double Tm = std::max(0.32, std::min(1.15, 0.30 + 0.004 * Dm));
-    TrackRel(m, targetCss - curCss, 0.0, Tm, gain, "main");
-    Sleep(80);
-
-    // 8 闭环同向逼近：主拖留了 6px 余量，这里最多两次只往前补，绝不倒回。
-    //   顶象对反向回拉极敏感；宁可留 -1~0px 微过冲，也不能往回拖。
-    for (int k = 0; k < 2; ++k) {
-        double err = targetSub - readSubMl();
-        if (err > 1.5) {
-            spdlog::info("[BCB] 同向逼近 #{} err={:.1f}", k + 1, err);
-            TrackRel(m, err / speed, 0.0, 0.14, gain, "nudge");
-            Sleep(70);
-        } else {
-            break;
-        }
-    }
-    double err = targetSub - readSubMl();
-    if (err < -1.0) spdlog::warn("[BCB] 微过冲 {:.1f}px，不回拉", -err);
-    spdlog::info("[BCB] final subMl={:.1f} target={:.1f} err={:.1f}",
-                 readSubMl(), targetSub, targetSub - readSubMl());
-    // 到位后按住停顿 2s 再松手（真人拖到位会稍作停顿，直接秒松易被判机器）
-    spdlog::info("[BCB] 到位停顿 2000ms 后释放");
-    Sleep(2000);
-    m.leftUp(); Sleep(2500);
-
-    // 轨迹诊断：页面真实收到的 mousemove 摘要（自动/人工对比用）
-    std::string seqDiag = EvalStrQ(
-        "(function(){var a=window.__mseq||[];if(!a.length)return '{}';"
-        "var ds=[],dt=[],n=0;"
-        "for(var i=1;i<a.length;i++){if(a[i][3]!==1)continue;"
-        "ds.push(Math.abs(a[i][1]-a[i-1][1])+Math.abs(a[i][2]-a[i-1][2]));"
-        "dt.push(a[i][0]-a[i-1][0]);n++}"
-        "ds.sort(function(x,y){return x-y});dt.sort(function(x,y){return x-y});"
-        "return JSON.stringify({total:a.length,down:n,"
-        "dtMed:dt.length?dt[dt.length>>1]:0,dtMax:dt.length?dt[dt.length-1]:0,"
-        "stepMed:ds.length?ds[ds.length>>1]:0,stepMax:ds.length?ds[ds.length-1]:0,"
-        "x0:a[0][1],x1:a[a.length-1][1]})})()", 3000);
-    spdlog::info("[BCB] 轨迹诊断(页面mousemove): {}", seqDiag);
-
-    // 9 判定：弹窗 = 失败；拼图收起且无弹窗 = 通过
-    if (!PopupText().empty()) return "popup: " + PopupText();
-    std::string st = EvalStr(
-        "(function(){var c=document.querySelector('.dx_captcha_basic_content');"
-        "var cap=document.getElementById('captcha');"
-        "return JSON.stringify({disp:c?getComputedStyle(c).display:'gone',"
-        "txt:(document.body.innerText||'').indexOf('验证成功')>=0,"
-        "cap:cap?cap.className:''});})()");
-    try {
-        auto j = nlohmann::json::parse(st);
-        std::string disp = j.value("disp", "gone");
-        bool txt = j.value("txt", false);
-        std::string cap = j.value("cap", "");
-        if (disp == "none" || txt || cap.find("success") != std::string::npos) return "";
-    } catch (...) {}
-    return "puzzle-still-open";
-}
 
 // ----------------------------------------------------------------------------
 // 人工等待秒数：默认 300s（5 分钟），超时后自动停止登录（不再等待/重试）。
@@ -2421,343 +2241,8 @@ static int ManualWaitSeconds() {
     return 300;   // 5 分钟无人处理即自动停止登录
 }
 
-// ----------------------------------------------------------------------------
-// 顶象降级后的「文字点选验证码」检测与人工呼叫
-// 图中样式：一张背景图 + 「请依次点击 XX 的汉字」，人工要按顺序点汉字。
-// 这不是滑块，RPA 无法自动识别 —— 一旦出现必须鸣笛叫人，且不能 reload
-// （刷新会换一张验证码，人工白点）。
-// ----------------------------------------------------------------------------
-bool BCBPlugin::DetectClickWordCaptcha() {
-    // 用可见文本判断，兼容顶象各种 DOM 结构版本：
-    // 典型提示：「请依次点击 美 的汉字」「请点击图中的XX」「依次点击…汉字」
-    std::string js =
-        "(function(){var t=(document.body.innerText||'').replace(/\\s+/g,'');"
-        // 明确命中：依次点击 + 汉字/文字/点击
-        "if(/依次点击/.test(t))return true;"
-        "if(/请点击.{0,10}(汉字|文字|字)/.test(t))return true;"
-        "if(/点击.{0,6}(图中|下面|下列).{0,6}(汉字|文字|字)/.test(t))return true;"
-        // 顶象文字点选容器特征（不同版本 class 名）
-        "var sel=['.dx_captcha_word','.dx_captcha_click','.dx_captcha_basic_click',"
-        "'.dx_captcha_text','.yidun_text_click','[class*=word-click]','[class*=text-click]'];"
-        "for(var s of sel){var e=document.querySelector(s);"
-        "if(e&&e.getBoundingClientRect().width>0)return true;}"
-        "return false;})()";
-    bool hit = EvalBool(js);
-    if (hit) spdlog::warn("[BCB] 检测到「文字点选验证码」（需人工按顺序点汉字）");
-    return hit;
-}
 
-// 把一个 UTF-8 字符串按字符切开（中文点选提示里可能有多个目标字）
-static std::vector<std::string> Utf8Chars(const std::string& s) {
-    std::vector<std::string> out;
-    for (size_t i = 0; i < s.size();) {
-        unsigned char c = (unsigned char)s[i];
-        size_t n = 1;
-        if ((c & 0xE0) == 0xC0) n = 2;
-        else if ((c & 0xF0) == 0xE0) n = 3;
-        else if ((c & 0xF8) == 0xF0) n = 4;
-        out.push_back(s.substr(i, n));
-        i += n;
-    }
-    return out;
-}
 
-// 自动点选汉字验证码（超级鹰 9800 返回「字,x,y|字,x,y」，坐标相对上传的图）：
-//   1) 找到验证码背景 img/canvas 元素，取它在 viewport 的位置和尺寸
-//   2) 用 CDP clip 只截这个元素 -> 上传超级鹰 9800 -> 得到每个字的图内坐标
-//   3) 从「请依次点击 XX 的汉字」解析目标字序列
-//   4) 按目标字顺序匹配 OCR 坐标，换算成物理坐标，用 HID 逐个点击
-//   5) 点「确认/验证」，等验证码通过
-// 返回空串=通过；否则失败原因（调用方转人工）。
-std::string BCBPlugin::AutoClickWordCaptcha(HidMouse& m) {
-    if (!newrpa::ocr::GlobalOcrReady()) {
-        spdlog::warn("[BCB] 超级鹰打码未配置，无法自动点选");
-        return "ocr-not-ready";
-    }
-    // 点字用物理坐标，必须先标定 CSS->物理 的 origin（滑块链路也会标定，
-    // 这里独立兜底，保证从任意调用点进来都能正确换算）。
-    if (!CalibrateBoxOrigin(m)) {
-        spdlog::warn("[BCB] 点选前 origin 标定失败");
-        return "clickword-origin-failed";
-    }
-
-    // 1) 定位验证码图片元素：顶象点选一般在 .dx_captcha_* 容器里的 img/canvas。
-    //    取面积最大且可见的那张作为背景图。
-    std::string geoJs =
-        "(function(){"
-        "var cands=[];"
-        "document.querySelectorAll('canvas,img').forEach(function(e){"
-        "var r=e.getBoundingClientRect();"
-        "if(r.width<120||r.height<60)return;"
-        "if(getComputedStyle(e).display==='none')return;"
-        "var cls=(e.className||'')+' '+(e.parentElement?e.parentElement.className:'');"
-        "if(cls.indexOf('captcha')<0 && r.width>360)return;"  // 无 captcha 线索时仅收接近整宽的
-        "cands.push({x:r.left,y:r.top,w:r.width,h:r.height,a:r.width*r.height,cls:cls.slice(0,60)});"
-        "});"
-        "cands.sort(function(a,b){return b.a-a.a});"
-        // 关键发现：目标字（「请依次点击 XX 的汉字」里的 XX）是一张独立 PNG 图片，
-        // 位于 .dx_captcha_clickword_hint-cnt img（112x25），不在任何 DOM 文本里。
-        // 必须把这张小图送 OCR 才能读出要点哪个字。
-        "var hintImg='';"
-        "var hi=document.querySelector('.dx_captcha_clickword_hint-cnt img');"
-        "if(hi&&hi.src&&hi.src.indexOf('data:image')===0)hintImg=hi.src;"
-        "var t=(document.body.innerText||'').replace(/\\s+/g,'');"
-        "return JSON.stringify({img:cands[0]||null,hintImg:hintImg,body:t.slice(-150)});"
-        "})()";
-    std::string geo = EvalStrQ(geoJs, 8000);
-    // 日志不打印巨大的 hintImg base64，只摘要
-    {
-        std::string brief = geo;
-        auto hp = brief.find("\"hintImg\":\"data:");
-        if (hp != std::string::npos) {
-            auto he = brief.find("\",\"", hp);
-            if (he != std::string::npos) brief.replace(hp + 11, he - hp - 11, "...(base64)");
-        }
-        spdlog::info("[BCB] 点选验证码 geo: {}", brief.substr(0, 900));
-    }
-    if (geo.empty()) return "clickword-geo-failed";
-
-    double imgX = 0, imgY = 0, imgW = 0, imgH = 0;
-    std::string hintImg;
-    try {
-        auto j = nlohmann::json::parse(geo);
-        hintImg = j.value("hintImg", "");
-        if (!j.contains("img") || j["img"].is_null()) return "clickword-img-not-found";
-        imgX = j["img"].value("x", 0.0);
-        imgY = j["img"].value("y", 0.0);
-        imgW = j["img"].value("w", 0.0);
-        imgH = j["img"].value("h", 0.0);
-    } catch (...) { return "clickword-geo-parse-failed"; }
-    if (imgW < 120 || imgH < 60) return "clickword-img-too-small";
-
-    // 2) 用 CDP clip 只截验证码元素。
-    //    captureScreenshot 的 clip 是 CSS 像素（deviceScaleFactor=1），
-    //    返回的 PNG 尺寸 ≈ imgW x imgH，OCR 坐标即图内坐标。
-    nlohmann::json clip = {
-        {"x", imgX}, {"y", imgY}, {"width", imgW}, {"height", imgH}, {"scale", 1}
-    };
-    std::string b64;
-    try {
-        auto r = session_->Call("Page.captureScreenshot",
-                                {{"format", "png"}, {"clip", clip}}, 15000);
-        b64 = r.value("data", "");
-    } catch (const std::exception& e) {
-        spdlog::warn("[BCB] 点选截图失败: {}", e.what());
-        return "clickword-capture-failed";
-    }
-    const std::string kPre = "data:image/png;base64,";
-    std::string dataUrl = kPre + b64;
-    // 落盘一份便于离线复核
-    try {
-        auto png = util::Base64Decode(b64);
-        WriteBinaryFile((fs::path(DownloadDir()) / "_clickword_capture.png").string(),
-                        std::string(reinterpret_cast<const char*>(png.data()), png.size()));
-    } catch (...) {}
-
-    // 3) 超级鹰 9800：返回「字,x,y|字,x,y」
-    std::string code, ocrErr;
-    newrpa::ocr::ChaojiyingOcr ocr(newrpa::ocr::GlobalOcrCred());
-    if (!ocr.OcrFromDataUrl(dataUrl, "9800", code, ocrErr)) {
-        spdlog::warn("[BCB] 点选 OCR 失败: {}", ocrErr);
-        return "clickword-ocr-failed: " + ocrErr;
-    }
-    spdlog::info("[BCB] 点选 OCR 结果: {}", code);
-
-    // 解析成 {字 -> {x,y}}（同名取第一个）
-    std::map<std::string, std::pair<int,int>> pos;
-    {
-        std::stringstream ss(code);
-        std::string seg;
-        while (std::getline(ss, seg, '|')) {
-            // 从右往左找两个逗号：字,x,y（字本身可能含 UTF-8 多字节但不含逗号）
-            auto p2 = seg.rfind(',');
-            if (p2 == std::string::npos) continue;
-            auto p1 = seg.rfind(',', p2 - 1);
-            if (p1 == std::string::npos) continue;
-            std::string ch = seg.substr(0, p1);
-            int x = std::atoi(seg.substr(p1 + 1, p2 - p1 - 1).c_str());
-            int y = std::atoi(seg.substr(p2 + 1).c_str());
-            if (!ch.empty() && !pos.count(ch)) pos[ch] = {x, y};
-        }
-    }
-    if (pos.empty()) return "clickword-ocr-empty";
-
-    // 4) 目标字识别：目标字是独立 PNG（.dx_captcha_clickword_hint-cnt img，112x25）
-    //    上的扭曲艺术字，普通文字题(1004/2004)识别不准；实测点选定位题 9800 能返回中文
-    //    （形如「字,x,y|字,x,y」），取其中的汉字与候选图 OCR 结果求交集 = 要点的目标字。
-    std::string hintText;
-    if (hintImg.empty()) {
-        spdlog::warn("[BCB] 未找到目标字提示图片(hint-cnt img)，转人工");
-        return "clickword-hintimg-not-found";
-    }
-    {
-        std::string hintErr;
-        if (!ocr.OcrFromDataUrl(hintImg, "9800", hintText, hintErr)) {
-            spdlog::warn("[BCB] 目标字提示图 OCR(9800) 失败: {}", hintErr);
-            return "clickword-hint-ocr-failed: " + hintErr;
-        }
-        spdlog::info("[BCB] 目标字提示图 OCR(9800) 原始结果: {}", hintText);
-    }
-    // 9800 返回「字,x,y|...」。关键：超级鹰返回的中文可能是 UTF-8 中文，也可能是
-    // 字面 \uXXXX 转义串（取决于 OcrFromDataUrl 是否解码）。候选图 pos 的 key 用的是
-    // 同样的原始串，因此这里必须用完全相同的切法（逗号前一段）才能求交集——不能用
-    // 中文字节判断去过滤，否则字面 \uXXXX 会被当成 ASCII 丢掉。
-    std::vector<std::string> hintChars;
-    {
-        std::stringstream ss(hintText);
-        std::string seg;
-        while (std::getline(ss, seg, '|')) {
-            auto p = seg.find(',');
-            std::string key = (p == std::string::npos) ? seg : seg.substr(0, p);
-            if (!key.empty()) hintChars.push_back(key);
-        }
-    }
-    if (hintChars.empty()) {
-        spdlog::warn("[BCB] 目标字提示图未解析出字 (raw={})，转人工", hintText);
-        return "clickword-hint-empty";
-    }
-    // 与候选字 OCR 字集求交集，命中即目标字（同一字只点一次）
-    std::vector<std::pair<int,int>> targets;
-    std::string picked;
-    std::set<std::string> used;
-    for (const auto& ch : hintChars) {
-        if (used.count(ch)) continue;
-        auto it = pos.find(ch);
-        if (it != pos.end()) {
-            targets.push_back(it->second);
-            picked += ch;
-            used.insert(ch);
-        }
-    }
-    spdlog::info("[BCB] 点选目标字 提示图字集={} 命中={} 个数={}",
-                 hintText, picked, targets.size());
-    if (targets.empty()) return "clickword-no-target-match";
-
-    // 5) 按序点击：captureScreenshot 在真实 DPI 下返回的图被放大了 scale 倍
-    //    （本机 DPI 120/96=1.25），所以 OCR 图内像素要先 /scale 还原成 CSS 偏移，
-    //    再叠加元素在 viewport 的 CSS 位置，最后经 origin/scale 转物理。
-    //    每个字之间加拟人小停顿，点击前先移过去停一下再按下。
-    double dpr = m.scale();
-    spdlog::info("[BCB] 点选坐标换算: 截图dpr={:.3f} 元素viewport=({:.0f},{:.0f},{:.0f}x{:.0f})",
-                 dpr, imgX, imgY, imgW, imgH);
-    for (size_t i = 0; i < targets.size(); ++i) {
-        double cssX = imgX + targets[i].first  / dpr;
-        double cssY = imgY + targets[i].second / dpr;
-        int physX = (int)m.cssToPhysX(cssX);
-        int physY = (int)m.cssToPhysY(cssY);
-        spdlog::info("[BCB] 点字[{}] 图内=({},{}) css=({:.0f},{:.0f}) 物理=({},{})",
-                     i + 1, targets[i].first, targets[i].second, cssX, cssY, physX, physY);
-        m.moveTo(physX, physY);
-        Sleep(180 + (i % 3) * 70);
-        m.leftDown();
-        Sleep(90);
-        m.leftUp();
-        Sleep(320);
-    }
-
-    // 6) 点「确认/验证/确定」按钮（若有）
-    ClickElementJs(".dx_captcha_basic_btn, .dx_captcha_basic_submit");
-    Sleep(600);
-    ClickButtonByText("确认");
-    ClickButtonByText("确定");
-    Sleep(1800);
-
-    // 7) 等验证码通过：容器 display:none 或含 success
-    for (int i = 0; i < 12; ++i) {
-        std::string st = EvalStrQ(
-            "(function(){var c=document.querySelector('.dx_captcha_basic_content');"
-            "var cap=document.getElementById('captcha');"
-            "return JSON.stringify({disp:c?getComputedStyle(c).display:'gone',"
-            "txt:(document.body.innerText||'').indexOf('验证成功')>=0,"
-            "cap:cap?cap.className:''});})()", 5000);
-        try {
-            auto j = nlohmann::json::parse(st);
-            if (j.value("disp", "") == "none" || j.value("txt", false) ||
-                j.value("cap", "").find("success") != std::string::npos) {
-                spdlog::info("[BCB] 点选验证码已通过");
-                return "";
-            }
-        } catch (...) {}
-        Sleep(600);
-    }
-
-    // 8) 验证码通过但还没登录：确保账号密码还在，点「登录」提交，等跳转离开 /login
-    if (!PopupText().empty()) return "clickword-popup: " + PopupText();
-    std::string plen = EvalStrQ(
-        "(function(){try{return ''+pgeCtrl.pwdLength()}catch(e){return 'E'}})()");
-    if (plen != "6") {
-        spdlog::info("[BCB] 点选通过后密码位数={}，补填一次", plen);
-        if (!FillQueryAccountPwd()) return "clickword-refill-failed";
-    }
-    ClickButtonByText("登录");
-    for (int i = 0; i < 25; ++i) {
-        Sleep(1000);
-        std::string url = EvalStrQ("location.href", 5000);
-        if (!url.empty() && url.find("/login") == std::string::npos) {
-            spdlog::info("[BCB] 自动点选验证码后登录成功: {}", url);
-            return "";
-        }
-    }
-    return "clickword-submit-no-redirect";
-}
-
-std::string BCBPlugin::WaitHumanClickCaptcha() {
-    const int waitS = 300;   // 固定 5 分钟；未点击确定就自动结束登录
-    spdlog::warn("[BCB] >>>>> 文字点选验证码：弹出对话框请人工处理，点确定后继续（5分钟未点自动停止）<<<<<");
-    Beep(1000, 200);
-
-    const wchar_t* title = L"北京银行查询版 - 需要人工处理验证码";
-    const wchar_t* text =
-        L"检测到顶象「文字点选验证码」，无法自动识别。\n\n"
-        L"请在浏览器窗口中：\n"
-        L"  1) 按提示依次点击正确的汉字完成验证；\n"
-        L"  2) 如需登录，请点「登录」按钮完成登录。\n\n"
-        L"完成后回到本对话框点「确定」，程序将自动继续获取余额、流水等信息。\n"
-        L"注意：5 分钟内未点确定，程序将自动停止登录。";
-
-    // 对话框是模态阻塞的，用 watchdog 线程在 waitS 秒后找到该窗口并关闭它，
-    // 实现「5 分钟未点确定自动停止」。timedOut 标记区分是用户点的还是超时关的。
-    std::atomic<bool> timedOut{false};
-    std::atomic<bool> dismissed{false};
-    std::thread watchdog([&]() {
-        auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::seconds(waitS);
-        while (!dismissed.load() &&
-               std::chrono::steady_clock::now() < deadline) {
-            Sleep(300);
-        }
-        if (dismissed.load()) return;          // 用户已点确定
-        HWND h = FindWindowW(nullptr, title);
-        if (h) {
-            timedOut.store(true);
-            spdlog::warn("[BCB] 人工 5 分钟未点确定，自动关闭对话框并停止登录");
-            PostMessageW(h, WM_CLOSE, 0, 0);   // 让 MessageBox 返回
-        }
-    });
-
-    MessageBoxW(nullptr, text, title, MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
-    dismissed.store(true);
-    watchdog.join();
-
-    if (timedOut.load()) {
-        return "need-manual: click-word-captcha-timeout";
-    }
-    spdlog::info("[BCB] 人工已点对话框确定，检查登录状态并继续");
-
-    // 点确定后给一段缓冲等 URL 离开 /login（用户可能确定后才点登录）。
-    auto t0 = std::chrono::steady_clock::now();
-    while (std::chrono::duration<double>(
-               std::chrono::steady_clock::now() - t0).count() < 30.0) {
-        std::string url = EvalStrQ("location.href", 5000);
-        if (url.find("/login") == std::string::npos && !url.empty()) {
-            loggedIn_ = true;
-            spdlog::info("[BCB] 人工完成点选验证码并登录成功: {}", url);
-            return "";
-        }
-        Sleep(700);
-    }
-    return "need-manual: login-not-complete-after-confirm";
-}
 
 // ----------------------------------------------------------------------------
 // 鸣笛呼唤人工：不碰 HID，等真人拖滑块（最长 ManualWaitSeconds()），成功后自动点登录
@@ -3039,11 +2524,7 @@ std::string BCBPlugin::LoginQuery() {
     std::string url = cfg_.loginUrl.empty() ? kQueryUrl : cfg_.loginUrl;
     if (url.find("version=query") == std::string::npos) url = kQueryUrl;
 
-    HidMouse m;
-    if (!m.open()) {
-        spdlog::error("[BCB] 盒子鼠标打不开: {}", m.lastError());
-        return "error: hid-mouse-open-failed";
-    }
+
 
     // Chrome 156 的本地网络访问（LNA）权限：登录页会去连 wss://127.0.0.1:7802/27724/57658
     // 探测安全控件服务；未授权时浏览器右上角弹「访问此设备上的其他应用和服务」。
@@ -3087,7 +2568,11 @@ std::string BCBPlugin::LoginQuery() {
         spdlog::error("[BCB] 查询版登录表单没找到. URL={}", EvalStr("location.href"));
         return "error: query login form not found";
     }
-
+    HidMouse m;
+    if (!m.open()) {
+        spdlog::error("[BCB] 盒子鼠标打不开: {}", m.lastError());
+        return "error: hid-mouse-open-failed";
+    }
     // 自动重试上限：非凭证类失败一律自动重试到 10 次，之后才转人工。
     // 只有「用户名/密码错误」这类凭证问题立即停 —— 重试无意义且可能锁账号。
     const int kMaxAutoAttempts = 10;
@@ -3121,16 +2606,16 @@ std::string BCBPlugin::LoginQuery() {
 
         // 顶象降级为「文字点选验证码」：按用户要求直接鸣笛呼叫人工，不做自动点字。
         // 绝不 reload（刷新会换验证码，人工白点）。
-        if (DetectClickWordCaptcha()) {
+        if (captchaChain_->DetectClickWord(*this)) {
             spdlog::warn("[BCB] 顶象已降级为文字点选验证码，鸣笛呼叫人工");
-            std::string r = WaitHumanClickCaptcha();
+            std::string r = captchaChain_->SolveBcb(*this, &m);
             if (r.empty()) return "ok";
             return "error: " + r;
         }
 
         if (!FillQueryAccountPwd()) { failReason = "fill-failed"; continue; }
 
-        std::string sres = SliderAttempt(m);
+        std::string sres = sliderSolver_->Attempt(*this, m);
         if (!sres.empty()) {
             failReason = sres;
             spdlog::warn("[BCB] 滑块尝试 {} 失败: {}", attempt, sres);
@@ -3138,9 +2623,9 @@ std::string BCBPlugin::LoginQuery() {
             if (sres.find("图形验证码") != std::string::npos) {
                 ClickPopupOk();
                 Sleep(1200);
-                if (DetectClickWordCaptcha()) {
+                if (captchaChain_->DetectClickWord(*this)) {
                     spdlog::warn("[BCB] 滑块降级后出现文字点选验证码，鸣笛呼叫人工");
-                    std::string r = WaitHumanClickCaptcha();
+                    std::string r = captchaChain_->SolveBcb(*this, &m);
                     if (r.empty()) return "ok";
                     return "error: " + r;
                 }
@@ -3171,9 +2656,9 @@ std::string BCBPlugin::LoginQuery() {
                 if (pop.find("图形验证码") != std::string::npos) {
                     ClickPopupOk();
                     Sleep(1500);
-                    if (DetectClickWordCaptcha()) {
+                    if (captchaChain_->DetectClickWord(*this)) {
                         spdlog::warn("[BCB] 提交被拒后出现文字点选验证码，鸣笛呼叫人工");
-                        std::string r = WaitHumanClickCaptcha();
+                        std::string r = captchaChain_->SolveBcb(*this, &m);
                         if (r.empty()) return "ok";
                         return "error: " + r;
                     }
@@ -3198,9 +2683,9 @@ std::string BCBPlugin::LoginQuery() {
             ClickPopupOk();
             Sleep(1200);
         }
-        if (DetectClickWordCaptcha()) {
+        if (captchaChain_->DetectClickWord(*this)) {
             spdlog::warn("[BCB] 转人工时已是文字点选验证码，鸣笛呼叫人工");
-            std::string r = WaitHumanClickCaptcha();
+            std::string r = captchaChain_->SolveBcb(*this, &m);
             if (r.empty()) return "ok";
             return "error: " + r;
         }

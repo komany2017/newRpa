@@ -179,13 +179,21 @@ bool MinWS::RecvExact(uint8_t* buf, size_t len, int timeoutMs) {
 #else
         ssize_t n = ::recv(sock_, buf + got, len - got, 0);
 #endif
-        if (n == 0) return false;
+        if (n == 0) {
+            // 对端正常关闭；必须清掉状态，否则上层会把“偶发 false”当成普通超时而忙循环。
+            connected_.store(false);
+            return false;
+        }
         if (n < 0) {
 #if defined(_WIN32)
-            if (WSAGetLastError() == WSAETIMEDOUT) return false;
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) return false;
+            if (err == WSAEINTR) continue;
 #else
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EAGAIN) return false;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+            if (errno == EINTR) continue;
 #endif
+            connected_.store(false);
             return false;
         }
         got += n;
@@ -417,51 +425,70 @@ bool MinWS::ReadFramePayload(std::vector<uint8_t>& out, int timeoutMs) {
 bool MinWS::RecvMessage(Message& out, int timeoutMs) {
     if (!connected_.load()) return false;
 
-    // 读 opcode + payload
-    uint8_t hdr[2];
-    if (!RecvExact(hdr, 2, timeoutMs)) return false;
+    // 防止伪造/损坏的长度头导致超大分配；
+    // CDP 截图 base64 一般远小于这个上限。
+    constexpr uint64_t kMaxPayload = 256ull * 1024 * 1024;
 
-    bool fin    = (hdr[0] & 0x80) != 0;
-    uint8_t opcode = hdr[0] & 0x0F;
-    bool masked = (hdr[1] & 0x80) != 0;
-    uint64_t payloadLen = hdr[1] & 0x7F;
+    // 用循环而非递归处理 PING/PONG，避免连续控制帧把栈打爆。
+    for (;;) {
+        if (!connected_.load()) return false;
 
-    if (payloadLen == 126) {
-        uint8_t e[2]; RecvExact(e, 2, timeoutMs);
-        payloadLen = (e[0] << 8) | e[1];
-    } else if (payloadLen == 127) {
-        uint8_t e[8]; RecvExact(e, 8, timeoutMs);
-        payloadLen = 0;
-        for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | e[i];
+        uint8_t hdr[2] = {};
+        if (!RecvExact(hdr, sizeof(hdr), timeoutMs)) return false;
+
+        bool fin    = (hdr[0] & 0x80) != 0;
+        uint8_t opcode = hdr[0] & 0x0F;
+        bool masked = (hdr[1] & 0x80) != 0;
+        uint64_t payloadLen = hdr[1] & 0x7F;
+        (void)fin; // 目前不支持跨帧分片；Chrome CDP 通常发完整帧
+
+        if (payloadLen == 126) {
+            uint8_t e[2] = {};
+            if (!RecvExact(e, sizeof(e), timeoutMs)) return false;
+            payloadLen = (static_cast<uint64_t>(e[0]) << 8) | e[1];
+        } else if (payloadLen == 127) {
+            uint8_t e[8] = {};
+            if (!RecvExact(e, sizeof(e), timeoutMs)) return false;
+            payloadLen = 0;
+            for (int i = 0; i < 8; ++i)
+                payloadLen = (payloadLen << 8) | e[i];
+        }
+
+        if (payloadLen > kMaxPayload) return false;
+
+        uint8_t maskKey[4] = {};
+        if (masked && !RecvExact(maskKey, sizeof(maskKey), timeoutMs))
+            return false;
+
+        std::vector<uint8_t> payload(static_cast<size_t>(payloadLen));
+        if (payloadLen > 0) {
+            if (!RecvExact(payload.data(), payload.size(), timeoutMs))
+                return false;
+            if (masked) {
+                for (size_t i = 0; i < payload.size(); ++i)
+                    payload[i] ^= maskKey[i % 4];
+            }
+        }
+
+        if (opcode == OP_PING) {
+            WriteFrame(OP_PONG, payload.data(), payload.size());
+            continue;
+        }
+        if (opcode == OP_PONG) {
+            continue;
+        }
+        if (opcode == OP_CLOSE) {
+            WriteFrame(OP_CLOSE, payload.data(), payload.size());
+            connected_.store(false);
+            SOCK_CLOSE(sock_);
+            sock_ = SOCK_INVALID;
+            return false;
+        }
+
+        out.opcode = opcode;
+        out.data   = std::move(payload);
+        return true;
     }
-
-    uint8_t maskKey[4] = {};
-    if (masked) RecvExact(maskKey, 4, timeoutMs);
-
-    std::vector<uint8_t> payload(payloadLen);
-    if (payloadLen > 0) {
-        RecvExact(payload.data(), (size_t)payloadLen, timeoutMs);
-        if (masked) for (size_t i = 0; i < payloadLen; ++i)
-            payload[i] ^= maskKey[i % 4];
-    }
-
-    // 处理 PING → 自动 PONG
-    if (opcode == OP_PING) {
-        WriteFrame(OP_PONG, payload.data(), payload.size());
-        // 继续读下一条
-        return RecvMessage(out, timeoutMs);
-    }
-    // CLOSE → 回 Close 然后关闭
-    if (opcode == OP_CLOSE) {
-        WriteFrame(OP_CLOSE, payload.data(), payload.size());
-        connected_.store(false);
-        SOCK_CLOSE(sock_); sock_ = SOCK_INVALID;
-        return false;
-    }
-
-    out.opcode = opcode;
-    out.data   = std::move(payload);
-    return true;
 }
 
 } // namespace ws

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "newrpa/NewRpaExport.h"
 // ============================================================================
@@ -69,7 +69,6 @@ private:
     Options   opts_;
     uint32_t  pid_         = 0;
     bool      launched_    = false;
-    bool      ownUserData_ = false;   // 启动时自建的临时 profile
     std::string wsPrefix_;            // "ws://127.0.0.1:<port>/devtools"
 };
 

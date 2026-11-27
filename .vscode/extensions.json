@@ -1,0 +1,20 @@
+{
+    // ============================================================
+    // 本工作区推荐/排除的扩展
+    // 换机器或重装时，打开此工作区 VS Code 会自动提示安装
+    // ============================================================
+    "recommendations": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.powershell",
+        "ms-python.python",
+        "ms-ceintl.vscode-language-pack-zh-hans",
+        "workdaddy.cpp-env"
+    ],
+    // 下例扩展与本工作区的 IntelliSense 方案冲突（双引擎各自出诊断），
+    // 若已安装，扩展面板会标记为 "Not Recommended"，点 Disable (Workspace) 即可
+    "unwantedRecommendations": [
+        "llvm-vs-code-extensions.vscode-clangd"
+    ]
+}

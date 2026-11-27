@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
+#include <vector>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -36,24 +37,33 @@ using cdp::CDPSession;
 // ChromeLauncher
 // ----------------------------------------------------------------------------
 
+// 默认 Chrome profile 目录：exe 同级的 profiles/default（持久化，保留登录态）
+static std::string DefaultProfileDir() {
+#if defined(_WIN32)
+    char buf[MAX_PATH] = {0};
+    if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+        fs::path exe(buf);
+        return (exe.parent_path() / "profiles" / "default").string();
+    }
+#endif
+    return (fs::temp_directory_path() / "newrpa-profiles" / "default").string();
+}
+
 ChromeLauncher::ChromeLauncher(const Options& opts) : opts_(opts) {
     if (opts_.port <= 0) opts_.port = 9222;
     if (opts_.executablePath.empty())
         opts_.executablePath = FindChromeExecutable();
     if (opts_.userDataDir.empty()) {
-        // 建临时 profile 目录
-        opts_.userDataDir = (fs::temp_directory_path() / "newrpa-chrome-profile").string();
+        // 配置未指定 profile：用 exe 同级 profiles/default 作为持久化默认目录，
+        // 保留登录态/cookies（不用 %TEMP%，避免退出时被清理）
+        opts_.userDataDir = DefaultProfileDir();
         fs::create_directories(opts_.userDataDir);
-        ownUserData_ = true;
     }
     wsPrefix_ = "ws://127.0.0.1:" + std::to_string(opts_.port) + "/devtools";
 }
 
 ChromeLauncher::~ChromeLauncher() {
     if (!opts_.keepRunning) Shutdown();
-    if (ownUserData_ && !opts_.keepRunning) {
-        try { fs::remove_all(opts_.userDataDir); } catch (...) {}
-    }
 }
 
 // 按点号路径设置 JSON 值：如 "download.prompt_for_download" -> {"download":{"prompt_for_download":...}}
@@ -102,6 +112,66 @@ static void ApplyChromePrefs(const std::string& userDataDir, const std::string& 
     }
 }
 
+// ----------------------------------------------------------------------------
+// 启动辅助
+// ----------------------------------------------------------------------------
+
+// 端口上是否已经有可用的 CDP 端点。
+// 有 = 要么上次运行残留的 Chrome 还活着，要么用户按 launch.json 手工起好了
+// 浏览器（--no-launch 场景）。这两种情况都不该再拉一个新进程去抢同一个 profile。
+static bool CdpPortReady(int port) {
+    httplib::Client cli("127.0.0.1", port);
+    cli.set_connection_timeout(1);
+    auto resp = cli.Get("/json/version");
+    return resp && resp->status == 200;
+}
+
+#if defined(_WIN32)
+// UTF-8 -> UTF-16。CreateProcessA 走 ANSI 代码页，中文用户名/路径会被按 GBK
+// 重新解释成乱码路径，Chrome 起来就找不到 profile。
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                        &w[0], n);
+    return w;
+}
+#endif
+
+#if defined(_WIN32)
+// 当前进程是否跑在低完整性（Low Mandatory Level）令牌下。
+// 沙箱/受限容器里的进程就是这种令牌：Chrome 在这种令牌下 spawn 自己的
+// crash handler 后 OpenProcess 会被拒（crashpad_client_win.cc 0x5），
+// 于是走 ImmediateCrash 自杀，退出码 0x80000003 或 0xFFFF7001。
+// 这个失败跟命令行参数、profile、开关全都没关系，任何参数都救不回来。
+static bool IsLowIntegrityProcess() {
+    HANDLE hTok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hTok))
+        return false;
+    DWORD len = 0;
+    GetTokenInformation(hTok, TokenIntegrityLevel, nullptr, 0, &len);
+    bool low = false;
+    if (len > 0) {
+        std::vector<BYTE> buf(len);
+        if (GetTokenInformation(hTok, TokenIntegrityLevel, buf.data(), len, &len)) {
+            auto* label = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buf.data());
+            if (label && label->Label.Sid) {
+                DWORD cnt = *GetSidSubAuthorityCount(label->Label.Sid);
+                if (cnt > 0) {
+                    DWORD rid = *GetSidSubAuthority(label->Label.Sid, cnt - 1);
+                    low = rid < SECURITY_MANDATORY_MEDIUM_RID;
+                }
+            }
+        }
+    }
+    CloseHandle(hTok);
+    return low;
+}
+#endif
+
 bool ChromeLauncher::Launch() {
     if (launched_) return true;
 
@@ -110,8 +180,30 @@ bool ChromeLauncher::Launch() {
         return false;
     }
 
+    // ---- 0) 端口上已有 CDP：直接复用，不再新起进程 ----
+    if (CdpPortReady(opts_.port)) {
+        spdlog::info("[Chrome] 端口 {} 上已有 CDP 端点，复用现有浏览器（不新建进程）",
+                     opts_.port);
+        launched_ = true;
+        pid_ = 0;          // pid 未知 -> 析构/Shutdown 不会去杀别人的浏览器
+        return true;
+    }
+
+#if defined(_WIN32)
+    // 低完整性令牌下 Chrome 必然秒退（Crashpad 起不来）。早点说清楚，
+    // 免得把 0xFFFF7001 误当成参数问题去一遍遍调命令行。
+    if (IsLowIntegrityProcess()) {
+        spdlog::warn(
+            "[Chrome] 当前进程是 Low Mandatory Level（沙箱/受限令牌），"
+            "Chrome 在这种令牌下无法启动（Crashpad 起不来 -> 自杀 0xFFFF7001）。"
+            "请换普通权限的终端运行，或用 --no-launch 接已在运行的浏览器。");
+    }
+#endif
+
     // 启动前写入 Chrome Preferences（必须在 Chrome 进程启动前落盘）
-    ApplyChromePrefs(opts_.userDataDir, opts_.prefsJson);
+    // NEWRPA_NO_PREFS=1 可跳过（诊断用：区分 prefs 写入导致的启动异常）
+    if (std::getenv("NEWRPA_NO_PREFS") == nullptr)
+        ApplyChromePrefs(opts_.userDataDir, opts_.prefsJson);
 
     // 检测是否配置了 --enable-extensions（与硬编码 --disable-extensions 互斥）
     bool enableExt = false;
@@ -156,22 +248,48 @@ bool ChromeLauncher::Launch() {
         extList += d;
     }
 
-    // 处理 --disable-features 合并（DisableLoadExtensionCommandLineSwitch）
+    // ------------------------------------------------------------------
+    // 归一化 --disable-features
+    // Chrome 对同名开关只取最后一次出现的值，命令行里若有多条
+    // --disable-features=...，前面的会被后面的整条覆盖。配置里就同时有
+    // RendererCodeIntegrity 和 LocalNetworkAccessChecks 两条，而我们需要
+    // 补的 DisableLoadExtensionCommandLineSwitch 一旦拼在前一条上就等于没给。
+    // 所以这里把所有值合并成唯一一条（去重），需要加载扩展时再补开关。
+    // ------------------------------------------------------------------
     std::vector<std::string> extraArgs = opts_.extraArgs;
-    if (wantExt) {
-        const char* kSwitch = "DisableLoadExtensionCommandLineSwitch";
-        bool patched = false;
-        for (auto& a : extraArgs) {
-            if (a.rfind("--disable-features=", 0) == 0) {
-                if (a.find(kSwitch) == std::string::npos) {
-                    a += ","; a += kSwitch;      // 合并进用户已有的列表
-                }
-                patched = true;
-                break;
+    {
+        const std::string kPrefix = "--disable-features=";
+        std::vector<std::string> merged;          // 去重后的 feature 名
+        std::vector<std::string> kept;
+        auto addFeature = [&](const std::string& f) {
+            if (f.empty()) return;
+            if (std::find(merged.begin(), merged.end(), f) == merged.end())
+                merged.push_back(f);
+        };
+        for (const auto& a : extraArgs) {
+            if (a.rfind(kPrefix, 0) != 0) { kept.push_back(a); continue; }
+            std::string v = a.substr(kPrefix.size());
+            size_t p = 0;
+            while (p <= v.size()) {
+                auto c = v.find(',', p);
+                addFeature(v.substr(p, c == std::string::npos ? std::string::npos : c - p));
+                if (c == std::string::npos) break;
+                p = c + 1;
             }
         }
-        if (!patched)
-            extraArgs.push_back(std::string("--disable-features=") + kSwitch);
+        if (wantExt) addFeature("DisableLoadExtensionCommandLineSwitch");
+        extraArgs = std::move(kept);
+        if (!merged.empty()) {
+            std::string joined;
+            for (const auto& f : merged) {
+                if (!joined.empty()) joined += ",";
+                joined += f;
+            }
+            extraArgs.push_back(kPrefix + joined);
+        }
+    }
+
+    if (wantExt) {
         // 有扩展要加载时，去掉会一票否决的 --disable-extensions
         extraArgs.erase(
             std::remove(extraArgs.begin(), extraArgs.end(), std::string("--disable-extensions")),
@@ -186,6 +304,47 @@ bool ChromeLauncher::Launch() {
             if (a.rfind("--disable-extensions-except", 0) == 0) { hasExcept = true; break; }
         if (!hasExcept)
             extraArgs.push_back("--disable-extensions-except=" + extList);
+    }
+
+    // ------------------------------------------------------------------
+    // 必备开关：这三个是启动稳定性的底线，缺了就补
+    //   --disable-crash-reporter / --disable-breakpad
+    //       Crashpad 起不来时 Chrome 会 ImmediateCrash 自杀（0x80000003 /
+    //       0xFFFF7001），关掉崩溃上报可以绕开这一层。
+    //   --no-sandbox
+    //       Chrome 沙箱与部分安全软件 / 受限环境冲突，会直接起不来。
+    // 检测的是真正要用的 extraArgs（= config 的 chromeArgs 加工后的结果），
+    // 支持 "--flag" 和 "--flag=value" 两种写法；已有的话不重复加。
+    // ------------------------------------------------------------------
+    {
+        static const char* kRequired[] = {
+            "--disable-crash-reporter",
+            "--disable-breakpad",
+            "--no-sandbox",
+            "--disable-features=LocalNetworkAccessChecks",
+            "--start-maximized","--disable-desktop-notifications",
+            "--disable-gpu-vsync",
+            "--enable-print-preview"
+        };
+        std::string added;
+        for (const char* sw : kRequired) {
+            const std::string key(sw);
+            bool present = false;
+            for (const auto& a : extraArgs) {
+                if (a.compare(0, key.size(), key) == 0 &&
+                    (a.size() == key.size() || a[key.size()] == '=')) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                extraArgs.push_back(key);
+                added += " ";
+                added += key;
+            }
+        }
+        if (!added.empty())
+            spdlog::info("[Chrome] chromeArgs 缺少必备开关，自动补齐:{}", added);
     }
 
     // 组装命令行
@@ -221,18 +380,112 @@ bool ChromeLauncher::Launch() {
         spdlog::info("[Chrome] 扩展加载: {} 个 -> {}", extDirs.size(), extList);
     spdlog::info("[Chrome] Launch: {}", cmdStr);
 
+    // ------------------------------------------------------------------
+    // 启动：两阶段尝试
+    //   阶段 1「完整参数」 —— prefs + 扩展 + 配置里的 chromeArgs（+ 必备开关）
+    //   阶段 2「最小参数」 —— 只保留让 CDP 起来的必需项（同样带必备开关）
+    // 三个必备开关已经在上面统一补齐，所以这里只保留两个阶段：
+    // 再单开一个「+关崩溃上报」的阶段会与阶段 1 完全重复。
+    // ------------------------------------------------------------------
+    std::ostringstream minimal;
+    minimal << "\"" << opts_.executablePath << "\""
+            << " --remote-debugging-port=" << opts_.port
+            << " --user-data-dir=\"" << opts_.userDataDir << "\""
+            << " --no-first-run --no-default-browser-check"
+            << " --disable-crash-reporter --disable-breakpad --no-sandbox"
+            << " about:blank";
+
 #if defined(_WIN32)
-    STARTUPINFOA si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, cmdStr.data(), nullptr, nullptr,
-                        FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        spdlog::error("[Chrome] CreateProcess failed, err={}", GetLastError());
+    DWORD lastExitCode = 0;
+
+    auto runAttempt = [&](const char* name, const std::string& cmd,
+                          int timeoutSec) -> bool {
+        spdlog::info("[Chrome] 启动({}): {}", name, cmd);
+
+        // CreateProcessW 需要可写缓冲区（会就地改命令行）
+        std::wstring wcmd = Utf8ToWide(cmd);
+        std::vector<wchar_t> cmdBuf(wcmd.begin(), wcmd.end());
+        cmdBuf.push_back(L'\0');
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        si.wShowWindow = SW_SHOWMAXIMIZED;
+        if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, 0,
+                            nullptr, nullptr, &si, &pi)) {
+            spdlog::error("[Chrome] CreateProcessW 失败 ({}), err={}", name,
+                          GetLastError());
+            return false;
+        }
+        CloseHandle(pi.hThread);
+
+        // pi.hProcess 就是我们要的存活检测句柄，不必再 OpenProcess(pid)
+        // —— 受限令牌下 OpenProcess 自己子进程都可能被拒，这正是旧代码误判的源头
+        auto started = std::chrono::steady_clock::now();
+        auto deadline = started + std::chrono::seconds(timeoutSec);
+        bool exited = false;
+        DWORD exitCode = 0;
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (CdpPortReady(opts_.port)) {
+                long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - started)
+                                   .count();
+                spdlog::info("[Chrome] CDP ready (pid={}, {}ms, {})",
+                             pi.dwProcessId, ms, name);
+                pid_ = pi.dwProcessId;
+                CloseHandle(pi.hProcess);
+                launched_ = true;
+                return true;
+            }
+            if (GetExitCodeProcess(pi.hProcess, &exitCode) &&
+                exitCode != STILL_ACTIVE) {
+                exited = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+        if (exited) {
+            lastExitCode = exitCode;
+            spdlog::error("[Chrome] Chrome 启动后 {}ms 即退出, exitCode=0x{:08X} ({})",
+                          static_cast<long long>(elapsedMs),
+                          static_cast<unsigned>(exitCode), name);
+            if (elapsedMs < 3000) {
+                spdlog::error(
+                    "[Chrome] 「秒退」不是命令行拼错，而是 Chrome 在初始化 Crashpad "
+                    "时失败后主动自杀（常见 0x80000003 / 0xFFFF7001，stderr 会看到 "
+                    "crashpad_client_win.cc OpenProcess 拒绝访问）。");
+            }
+        } else {
+            spdlog::warn("[Chrome] CDP 端口 {} 在 {}s 内未就绪 ({})", opts_.port,
+                         timeoutSec, name);
+        }
+
+        // 清掉本次尝试的进程，别让它继续占着 profile / 端口，影响下一阶段
+        HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pi.dwProcessId);
+        if (h) {
+            TerminateProcess(h, 0);
+            WaitForSingleObject(h, 3000);
+            CloseHandle(h);
+        }
+        CloseHandle(pi.hProcess);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         return false;
-    }
-    pid_ = pi.dwProcessId;
-    CloseHandle(pi.hThread);
-    // 不 Close hProcess，Shutdown 时要用它
+    };
+
+    if (runAttempt("完整参数", cmdStr, 30)) return true;
+    if (runAttempt("最小参数", minimal.str(), 15)) return true;
+
+    spdlog::error(
+        "[Chrome] 完整参数与最小参数都起不来 —— 不是 Launch() 的拼接问题。"
+        " 请先手工验证这条命令能不能开 CDP: {}",
+        cmdStr);
+    (void)lastExitCode;
+    return false;
 #else
     pid_ = fork();
     if (pid_ == 0) {
@@ -244,26 +497,18 @@ bool ChromeLauncher::Launch() {
         spdlog::error("[Chrome] fork failed");
         return false;
     }
-#endif
-
-    // 等 /json/version 能响应
-    spdlog::info("[Chrome] Waiting for CDP port {} ...", opts_.port);
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    httplib::Client cli("127.0.0.1", opts_.port);
-    cli.set_connection_timeout(1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
-        auto resp = cli.Get("/json/version");
-        if (resp && resp->status == 200) {
-            spdlog::info("[Chrome] CDP ready (pid={})", pid_);
+        if (CdpPortReady(opts_.port)) {
             launched_ = true;
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-
-    spdlog::error("[Chrome] CDP port not ready");
+    spdlog::error("[Chrome] CDP port not ready after 30s");
     Shutdown();
     return false;
+#endif
 }
 
 void ChromeLauncher::Shutdown() {
@@ -404,7 +649,7 @@ std::string FindChromeExecutable() {
         "/usr/bin/google-chrome-stable",
         "/snap/bin/chromium",
         "/usr/bin/chromium-browser",
-        nullptrcs
+        nullptr
     };
     for (int i = 0; candidates[i]; ++i)
         if (access(candidates[i], X_OK) == 0) return candidates[i];
