@@ -67,7 +67,7 @@
             "command": "E:/Workdaddy/mingw64/bin/g++.exe",
             "args": [
                 "-fsyntax-only",
-                "-std=c++17",
+                "-std=c++20",
                 "-pthread",
                 "-DNEWRPA_USE_DLL",
                 "-DSPDLOG_COMPILED_LIB",

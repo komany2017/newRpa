@@ -34,7 +34,7 @@
             "id": "bankPick",
             "type": "pickString",
             "description": "选择要调试的银行",
-            "options": ["BOB", "ICBC", "KLB"],
+            "options": ["BOB", "ICBC", "KLB", "CCB"],
             "default": "BOB"
         },
         {
@@ -164,6 +164,150 @@
             "symbolLoadInfo": { "loadAll": true, "exception": "" },
             "internalConsoleOptions": "openOnSessionStart"
         },
+
+
+        // ================================================================
+        // ★★ CCB 建设银行（DemoV3 演示版）
+        //    登录页三个字段都是普通 input（无安全控件、无验证码、无软键盘），
+        //    纯 CDP 值注入即可，不需要 HID 硬件键盘。
+        //    凭据放在独立的 config.ccb.json（build-mingw/ 已在 .gitignore，
+        //    config.json 保持原样不被改写）。
+        //    断点位置：plugins/ccb/CCBPlugin.cpp
+        //        Login / QueryBalance / QueryDetail / DownBankSlip
+        //    demo 数据范围：明细 2015-09、回单 2026-01，其他日期返回空。
+        // ================================================================
+        {
+            "name": "★★ CCB 建设银行（demo）登录",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--bank", "CCB",
+                "--action", "login",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "插件代码在 libccb.dll 里，DLL 是运行时才 LoadLibrary 的。开启 pending 断点，否则 CCBPlugin.cpp:xxxx 断点会失效", "text": "set breakpoint pending on", "ignoreFailures": true },
+                { "description": "Enable pretty print", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "不要因 SIGPIPE 在无关第三方库停住", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        {
+            "name": "CCB 当日余额 (curbal)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--bank", "CCB",
+                "--action", "curbal",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "插件代码在 libccb.dll 里，DLL 是运行时才 LoadLibrary 的。开启 pending 断点，否则 CCBPlugin.cpp:xxxx 断点会失效", "text": "set breakpoint pending on", "ignoreFailures": true },
+                { "description": "Enable pretty print", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "不要因 SIGPIPE 在无关第三方库停住", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        {
+            "name": "CCB 历史明细 (histran, demo 2015-09)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--bank", "CCB",
+                "--action", "histran",
+                "--begin", "2015-09-01",
+                "--end", "2015-09-30",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "插件代码在 libccb.dll 里，DLL 是运行时才 LoadLibrary 的。开启 pending 断点，否则 CCBPlugin.cpp:xxxx 断点会失效", "text": "set breakpoint pending on", "ignoreFailures": true },
+                { "description": "Enable pretty print", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "不要因 SIGPIPE 在无关第三方库停住", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
+        {
+            "name": "CCB 电子回单 (slip, demo 2026-01)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+            "args": [
+                "run",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--bank", "CCB",
+                "--action", "slip",
+                "--begin", "2026-01-01",
+                "--end", "2026-01-31",
+                "--chrome-port", "9222"
+            ],
+            "cwd": "${workspaceFolder}/build-mingw/bin",
+            "environment": [
+                { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" },
+                { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" },
+                { "name": "PYTHONPATH", "value": "" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/Workdaddy/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                { "description": "插件代码在 libccb.dll 里，DLL 是运行时才 LoadLibrary 的。开启 pending 断点，否则 CCBPlugin.cpp:xxxx 断点会失效", "text": "set breakpoint pending on", "ignoreFailures": true },
+                { "description": "Enable pretty print", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "不要因 SIGPIPE 在无关第三方库停住", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build + Copy DLLs",
+            "symbolLoadInfo": { "loadAll": true, "exception": "" },
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+
 
         {
             "name": "★KLB 昆仑银行 登录(硬件键盘)",
