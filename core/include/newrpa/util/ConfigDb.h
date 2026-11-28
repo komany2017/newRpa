@@ -1,16 +1,22 @@
 #pragma once
 // ============================================================================
-// ConfigDb — 加密配置存储（sqlite3 + AES-256-CBC PKCS7）
+// ConfigDb — 结构化加密配置存储（sqlite3）
 //
-// 配置文件不再是明文 JSON，而是一个 sqlite3 数据库：
-//   table config(k TEXT PRIMARY KEY, v TEXT NOT NULL)
-//   k = "config_json"，v = base64( salt(16B) || IV(16B) || 密文 )
+// 设计：config.json 的每个字段拆到 sqlite3 表里，而不是把整个 JSON 加密成 BLOB。
+// 敏感字段（银行 password/certPassword、ocr.user/pass）在库内保持 "enc:v1:" 密文，
+// 由 LoadConfig 用 crypto.aesKey 解密（字段级加密）。
 //
-// 加密密钥由密码经 PBKDF2-HMAC-SHA256（60000 轮）派生为 32 字节。
-// 密码来源：环境变量 NEWRPA_DB_PASS 优先，缺省用内置默认密码。
+// 库密码（NEWRPA_DB_PASS > 默认 1qazxsw2A）用于打开校验：auth 表存
+// PBKDF2-HMAC-SHA256(salt, password) 的 verifier，密码不符拒绝读取。
 //
-// 任何读取失败（文件缺失/密码错误/密文损坏/表缺失）都返回 false，
-// 调用方 LoadConfig 据此退回空配置并报错——绝不静默读明文。
+// schema：
+//   auth(salt TEXT, verifier TEXT)                  库密码校验
+//   meta(k TEXT PRIMARY KEY, v TEXT, kind TEXT)     顶层标量字段
+//   list_val(section TEXT, idx INTEGER, v TEXT, kind TEXT)   顶层数组字段
+//   obj_val(section TEXT, k TEXT, v TEXT, kind TEXT)         对象字段(crypto/ocr/chromePrefs/httpTasks)
+//   banks(id INTEGER, k TEXT, v TEXT, kind TEXT)             银行字段(EAV)
+//
+// kind: str / num / bool / json —— 保证 JSON 类型无损往返。
 // ============================================================================
 #include "newrpa/NewRpaExport.h"
 #include <string>
@@ -18,17 +24,15 @@
 namespace newrpa {
 namespace util {
 
-// 取当前生效的数据库密码（环境变量 NEWRPA_DB_PASS > 内置默认值）。
-// 仅用于诊断显示，调用方不要把返回值写日志。
 NEWRPA_API std::string ConfigDbPassword();
 
-// 从加密 sqlite3 读取配置 JSON 文本。成功返回 true。
 NEWRPA_API bool ConfigDbRead(const std::string& dbPath, std::string& jsonOut,
                              std::string& errOut);
 
-// 把配置 JSON 文本写入加密 sqlite3（覆盖已有记录）。成功返回 true。
 NEWRPA_API bool ConfigDbWrite(const std::string& dbPath, const std::string& jsonText,
                               std::string& errOut);
+
+NEWRPA_API bool ConfigDbCheckPassword(const std::string& dbPath, std::string& errOut);
 
 } // namespace util
 } // namespace newrpa
