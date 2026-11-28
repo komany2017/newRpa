@@ -29,6 +29,7 @@
 #include "newrpa/arch/Context.h"
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/crypto/Crypto.h"
+#include "newrpa/util/ConfigDb.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -60,6 +61,8 @@ Usage:
   newrpa.exe keygen-rsa [--bits 2048] 生成 RSA 密钥对到 config crypto.rsaPrivateKeyFile/rsaPublicKeyFile
   newrpa.exe sign --value 数据        RSA 私钥签名，输出 base64
   newrpa.exe verify --value 数据 --signature BASE64   RSA 公钥验签
+  newrpa.exe config-import --from OLD.json [--config CONFIG.db]   JSON 迁移到加密 db
+  newrpa.exe config-export --to OUT.json [--config CONFIG.db]    加密 db 导出 JSON（调试用）
 
 Actions:
   all-accounts  所有账号: 历史交易(增量,优先)/当日交易/余额/回单
@@ -105,6 +108,7 @@ struct Args {
     std::string file, codeType; // ocr: 图片路径 / codetype
     std::string value;          // encrypt/decrypt/sign/verify: 待处理的串
     std::string signature;      // verify: base64 签名
+    std::string fromFile, toFile; // config-import / config-export
     size_t rsaBits = 2048;      // keygen-rsa: 密钥位数
     int chromePort = 0;
     bool noLaunch = false;
@@ -144,6 +148,10 @@ struct Args {
                 a.cmd = "sign";
             } else if (s == "verify") {
                 a.cmd = "verify";
+            } else if (s == "config-import") {
+                a.cmd = "config-import";
+            } else if (s == "config-export") {
+                a.cmd = "config-export";
             } else if (s == "--bank")
                 next(a.bank);
             else if (s == "--file")
@@ -152,6 +160,10 @@ struct Args {
                 next(a.value);
             else if (s == "--signature")
                 next(a.signature);
+            else if (s == "--from")
+                next(a.fromFile);
+            else if (s == "--to")
+                next(a.toFile);
             else if (s == "--bits") {
                 if (i + 1 < argc) a.rsaBits = (size_t)std::stoul(argv[++i]);
             }
@@ -510,6 +522,58 @@ int MainCrypt(const Args& args, const newrpa::util::GlobalConfig& cfg) {
 
 // ----------------------------------------------------------------------------
 
+// JSON → 加密 db（迁移工具；不改动源文件）
+int MainConfigImport(const Args& args) {
+    if (args.fromFile.empty()) {
+        spdlog::error("config-import: 需要 --from OLD.json");
+        return 1;
+    }
+    std::ifstream in(args.fromFile, std::ios::binary);
+    if (!in.is_open()) {
+        spdlog::error("config-import: cannot open {}", args.fromFile);
+        return 1;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    // 先验证是合法 JSON
+    try { nlohmann::json::parse(text); }
+    catch (const std::exception& e) {
+        spdlog::error("config-import: invalid JSON: {}", e.what());
+        return 1;
+    }
+    std::string err;
+    if (!newrpa::util::ConfigDbWrite(args.config, text, err)) {
+        spdlog::error("config-import: {}", err);
+        return 1;
+    }
+    std::cout << "imported -> " << args.config << std::endl;
+    return 0;
+}
+
+// 加密 db → JSON（仅调试；导出文件含凭据，注意保管）
+int MainConfigExport(const Args& args) {
+    if (args.toFile.empty()) {
+        spdlog::error("config-export: 需要 --to OUT.json");
+        return 1;
+    }
+    std::string text, err;
+    if (!newrpa::util::ConfigDbRead(args.config, text, err)) {
+        spdlog::error("config-export: {}", err);
+        return 1;
+    }
+    std::ofstream out(args.toFile, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        spdlog::error("config-export: cannot write {}", args.toFile);
+        return 1;
+    }
+    out << text;
+    out.close();
+    std::cout << "exported -> " << args.toFile << std::endl;
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+
 int main(int argc, char** argv) {
 
     Args args = Args::Parse(argc, argv);
@@ -521,6 +585,8 @@ int main(int argc, char** argv) {
     }
 
     if (args.cmd == "init") return MainInit(args.config);
+    if (args.cmd == "config-import") return MainConfigImport(args);
+    if (args.cmd == "config-export") return MainConfigExport(args);
     if (args.cmd == "chrome") return MainChrome(args, newrpa::util::LoadConfig(args.config));
 
     auto cfg = newrpa::util::LoadConfig(args.config);

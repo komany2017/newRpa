@@ -4,7 +4,7 @@
 # MinGW-w64 目标 (MSYS2 / WinLibs / MinGW-Builds 发行包都行)
 # ============================================================
 cmake_minimum_required(VERSION 3.24)
-project(NewRpaNext LANGUAGES CXX)
+project(NewRpaNext LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

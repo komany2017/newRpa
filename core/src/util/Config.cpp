@@ -8,6 +8,7 @@
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/cdp/CDPSession.h"
 #include "newrpa/crypto/Crypto.h"
+#include "newrpa/util/ConfigDb.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -29,15 +30,11 @@ using json = nlohmann::json;
 namespace newrpa {
 namespace util {
 
-GlobalConfig LoadConfig(const std::string& path) {
+// 解析配置 JSON 文本 → GlobalConfig（内部函数）
+static GlobalConfig ParseConfigJson(const std::string& jsonText) {
     GlobalConfig cfg;
-    std::ifstream in(path);
-    if (!in.is_open()) {
-        spdlog::warn("[Config] file not found: {}, using defaults", path);
-        return cfg;
-    }
     json j;
-    try { in >> j; }
+    try { j = json::parse(jsonText); }
     catch (const std::exception& e) {
         spdlog::error("[Config] parse error: {}", e.what());
         return cfg;
@@ -138,6 +135,18 @@ GlobalConfig LoadConfig(const std::string& path) {
     return cfg;
 }
 
+// 从加密 sqlite3 读取配置（配置存储唯一来源）
+GlobalConfig LoadConfig(const std::string& path) {
+    std::string jsonText, err;
+    if (!ConfigDbRead(path, jsonText, err)) {
+        spdlog::error("[Config] cannot read encrypted config db '{}': {}", path, err);
+        return GlobalConfig{};
+    }
+    spdlog::info("[Config] loaded encrypted config db: {}", path);
+    return ParseConfigJson(jsonText);
+}
+
+// 写一份默认加密配置库
 void SaveDefaultConfig(const std::string& path) {
     json j = {
         {"chromePath", ""},
@@ -174,9 +183,9 @@ void SaveDefaultConfig(const std::string& path) {
             }
         })}
     };
-    fs::create_directories(fs::path(path).parent_path());
-    std::ofstream out(path);
-    out << j.dump(2);
+    std::string err;
+    if (!ConfigDbWrite(path, j.dump(2), err))
+        spdlog::error("[Config] cannot write encrypted config db: {}", err);
 }
 
 } // namespace util

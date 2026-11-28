@@ -1,15 +1,21 @@
 # ============================================================
 # NewRpa Core Library — 编译成 NewRpaCore.dll / .lib
 #
-# 纯 C++17 + Win32 API，零外部网络库依赖（MinWS 自实现）
+# 纯 C++20 + Win32 API，零外部网络库依赖（MinWS 自实现）
 # ============================================================
+
+# sqlite3 为 C 源码，直接编译进 NewRpaCore（用 LANGUAGE C 避免 C++20 编译问题）
+set(SQLITE3_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sqlite/sqlite3.c)
+set_source_files_properties(${SQLITE3_SRC} PROPERTIES LANGUAGE C)
 add_library(NewRpaCore SHARED
+    ${SQLITE3_SRC}
     src/cdp/CDPSession.cpp
     src/cdp/CDPDomains.cpp
     src/ws/MinWS.cpp
     src/chrome/ChromeBrowser.cpp    # 含 ChromeLauncher 实现
     src/plugin/PluginLoader.cpp
-    src/util/Config.cpp              # 含 HttpClient/ExcelWriter/Crypto 桩
+    src/util/Config.cpp              # 含 HttpClient/ExcelWriter/Crypto
+    src/util/ConfigDb.cpp            # 加密配置存储（sqlite3 + AES）
     src/util/StringUtils.cpp
     src/util/LogSetup.cpp            # 控制台 + 滚动日志文件
     src/ocr/ChaojiyingOcr.cpp        # 超级鹰打码（公共 OCR）
@@ -30,6 +36,7 @@ target_include_directories(NewRpaCore
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include/newrpa/singleUsbbox
         ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/botan/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sqlite
 )
 
 # Botan 3.x 静态库（third_party/botan/lib/libbotan-3.a，mingw64 x86_64）
@@ -45,7 +52,7 @@ message(STATUS "Botan static: ${BOTAN_STATIC_LIB}")
 # 无需再对 Crypto.cpp 单独升标准（保留 find_library 结果供链接）。
 
 target_compile_definitions(NewRpaCore
-    PRIVATE NEWRPA_BUILD
+    PRIVATE NEWRPA_BUILD SQLITE_THREADSAFE=1 SQLITE_DQS=0
     PUBLIC  NEWRPA_USE_DLL
 )
 

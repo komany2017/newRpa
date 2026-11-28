@@ -10,7 +10,7 @@
     // 前置条件（首次做一次）:
     //   1. CMakeCache.txt 确认 CMAKE_BUILD_TYPE=Debug
     //   2. 不再需要手动启 Chrome：run 配置已去掉 --no-launch，
-    //      newrpa.exe 会按 config.json 自动启动有界面 Chrome（CDP 9222）。
+    //      newrpa.exe 会按加密 config.db 自动启动有界面 Chrome（CDP 9222）。
     //      只有 "Attach to..." 配置才需要 Chrome 已在运行。
     //
     // 断点可打在:
@@ -24,7 +24,7 @@
     //   core/include/newrpa/net/HttpDownloader.h — WinHTTP 请求收发 (Do)
     //
     // 新增银行后:
-    //   1. config.json 的 banks 数组里加一项
+    //   1. config.db 里的 banks 数组加一项（config-export → 编辑 JSON → config-import）
     //   2. 下面 "选银行" 下拉 options 里加一个值 (字符串, 必须等于 bankName)
     // =====================================================================
 
@@ -83,7 +83,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "${input:bankPick}",
                 "--action", "${input:actionPick}",
                 "--chrome-port", "9222"
@@ -113,7 +113,7 @@
         //     演示版 :9081  = 企业号 + 证书密码 + 登录密码
         //     查询版 443    = 账号 + 密码 + 顶象滑块        ← 本配置
         //
-        //   路由条件：config.json 里该 bank 的 loginUrl 含 version=query
+        //   路由条件：config.db 里该 bank 的 loginUrl 含 version=query
         //   → 自动进 BCBPlugin::LoginQuery()，演示版 Login() 一行不动。
         //
         //   前置由 preLaunchTask「Debug BCB Query (prepare)」自动完成：
@@ -140,7 +140,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "BOB",
                 "--action", "all",
                 "--chrome-port", "9222"
@@ -183,7 +183,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.db",
                 "--bank", "CCB",
                 "--action", "login",
                 "--chrome-port", "9222"
@@ -215,7 +215,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.db",
                 "--bank", "CCB",
                 "--action", "curbal",
                 "--chrome-port", "9222"
@@ -247,7 +247,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.db",
                 "--bank", "CCB",
                 "--action", "histran",
                 "--begin", "2015-09-01",
@@ -281,7 +281,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.ccb.db",
                 "--bank", "CCB",
                 "--action", "slip",
                 "--begin", "2026-01-01",
@@ -316,7 +316,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "login", "--chrome-port", "9333"
             ],
@@ -361,7 +361,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "curbal",
                 "--no-launch", "--chrome-port", "9333"
@@ -390,7 +390,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "curtran",
                 "--no-launch", "--chrome-port", "9333"
@@ -419,7 +419,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "histran",
                 "--begin", "${input:beginDate}",
@@ -450,7 +450,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "slip",
                 "--begin", "${input:beginDate}",
@@ -481,7 +481,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "all",
                 "--begin", "${input:beginDate}",
@@ -512,7 +512,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "KLB",
                 "--action", "all",
                 "--begin", "2026-08-01",
@@ -547,7 +547,7 @@
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
             "args": [
                 "run",
-                "--config", "${workspaceFolder}/build-mingw/bin/config.json",
+                "--config", "${workspaceFolder}/build-mingw/bin/config.db",
                 "--bank", "${input:bankPick}",
                 "--action", "${input:actionPick}",
                 "--begin", "${input:beginDate}",
@@ -579,7 +579,7 @@
             "name": "★ BCB 全账号下载 (自动启 Chrome)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "all-accounts", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "all-accounts", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -596,7 +596,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "login", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "login", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -612,7 +612,7 @@
             "name": "BCB 当日余额",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "curbal", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "curbal", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -628,7 +628,7 @@
             "name": "BCB 历史交易",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -644,7 +644,7 @@
             "name": "BCB 电子回单",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "slip", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "slip", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -669,7 +669,7 @@
             "name": "★ BCB HTTP 会话取数 (登录+抓Cookie+取数)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "http-session", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "http-session", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -685,7 +685,7 @@
             "name": "BCB HTTP 会话取数 (复用Cookie, 跳过登录)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "http-session", "--reuse-cookie", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "http-session", "--reuse-cookie", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -701,7 +701,7 @@
             "name": "BCB HTTP 直连 (http-direct)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "http-direct", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "http-direct", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -717,7 +717,7 @@
             "name": "BCB 抓包 (sniff → sniff_result.json)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "BOB", "--action", "sniff", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "BOB", "--action", "sniff", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -737,7 +737,7 @@
             "name": "ICBC 登录",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "ICBC", "--action", "login", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "ICBC", "--action", "login", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -753,7 +753,7 @@
             "name": "ICBC 历史交易",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.json", "--bank", "ICBC", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
+            "args": [ "run", "--config", "${workspaceFolder}/build-mingw/bin/config.db", "--bank", "ICBC", "--action", "histran", "--begin", "2026-11-01", "--end", "2026-11-20", "--chrome-port", "9222" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -775,7 +775,7 @@
             "name": "列出已加载插件 (newrpa list)",
             "type": "cppdbg", "request": "launch",
             "program": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
-            "args": [ "list", "--config", "${workspaceFolder}/build-mingw/bin/config.json" ],
+            "args": [ "list", "--config", "${workspaceFolder}/build-mingw/bin/config.db" ],
             "cwd": "${workspaceFolder}/build-mingw/bin",
             "environment": [ { "name": "PATH", "value": "E:/Workdaddy/mingw64/opt/bin;E:/Workdaddy/mingw64/bin;E:/Workdaddy/mingw32/mingw32/bin;${workspaceFolder}/build-mingw/bin;${workspaceFolder}/build-mingw/bin/plugins;${env:PATH}" }, { "name": "PYTHONHOME", "value": "E:/Workdaddy/mingw64/opt" }, { "name": "PYTHONPATH", "value": "" } ],
             "stopAtEntry": false, "externalConsole": false,
@@ -816,7 +816,7 @@
             "setupCommands": [ { "description": "Enable pretty print (gdb Python 已修复，std::string 直接显示值)", "text": "-enable-pretty-printing", "ignoreFailures": true } ]
         },
 
-        // 超级鹰打码自测（公共 OCR）：先在 config.json ocr 段填凭据
+        // 超级鹰打码自测（公共 OCR）：先在 config.db ocr 段填凭据
         {
             "name": "OCR 超级鹰自测",
             "type": "cppdbg", "request": "launch",
