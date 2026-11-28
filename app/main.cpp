@@ -11,6 +11,11 @@
 //   newrpa init                      # 生成默认 config.json
 //   newrpa chrome                    # 单独启动 Chrome + 调试端口
 //   newrpa ocr --file a.png [--codetype 1004]   # 超级鹰打码自测
+//   newrpa encrypt --value 明文       # AES 加密 → enc:v1:...（密钥: config crypto.aesKey）
+//   newrpa decrypt --value enc:v1:... # AES 解密自检
+//   newrpa keygen-rsa [--bits 2048]   # 生成 RSA 密钥对到 config 指定的 PEM 路径
+//   newrpa sign --value 数据          # RSA 私钥签名 → base64（私钥: config crypto.rsaPrivateKeyFile）
+//   newrpa verify --value 数据 --signature BASE64  # RSA 公钥验签
 // ============================================================================
 
 #include "newrpa/cdp/CDPDomains.h"
@@ -23,6 +28,7 @@
 #include "commands/BankCommands.h"
 #include "newrpa/arch/Context.h"
 #include "newrpa/util/StringUtils.h"
+#include "newrpa/crypto/Crypto.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -41,7 +47,7 @@ namespace fs = std::filesystem;
 
 static void PrintUsage() {
     std::cout << R"(
-NewRpa-Next — C++17 + CDP + Chrome 银行 RPA
+NewRpa-Next — C++20 + CDP + Chrome 银行 RPA
 
 Usage:
   newrpa.exe init
@@ -49,6 +55,11 @@ Usage:
   newrpa.exe list
   newrpa.exe run --bank BANK_NAME --action ACTION [options]
   newrpa.exe ocr --file IMG.png [--codetype 1004]   超级鹰打码自测（公共凭据）
+  newrpa.exe encrypt --value 明文     密码加密，输出 enc:v1:... （密钥: config crypto.aesKey）
+  newrpa.exe decrypt --value enc:v1:... 密码解密自检
+  newrpa.exe keygen-rsa [--bits 2048] 生成 RSA 密钥对到 config crypto.rsaPrivateKeyFile/rsaPublicKeyFile
+  newrpa.exe sign --value 数据        RSA 私钥签名，输出 base64
+  newrpa.exe verify --value 数据 --signature BASE64   RSA 公钥验签
 
 Actions:
   all-accounts  所有账号: 历史交易(增量,优先)/当日交易/余额/回单
@@ -92,6 +103,9 @@ struct Args {
     std::string begin, end;
     std::string amount, nums, paccno, no;
     std::string file, codeType; // ocr: 图片路径 / codetype
+    std::string value;          // encrypt/decrypt/sign/verify: 待处理的串
+    std::string signature;      // verify: base64 签名
+    size_t rsaBits = 2048;      // keygen-rsa: 密钥位数
     int chromePort = 0;
     bool noLaunch = false;
     bool headless = false;
@@ -120,10 +134,27 @@ struct Args {
                 a.cmd = "run";
             } else if (s == "ocr") {
                 a.cmd = "ocr";
+            } else if (s == "encrypt") {
+                a.cmd = "encrypt";
+            } else if (s == "decrypt") {
+                a.cmd = "decrypt";
+            } else if (s == "keygen-rsa") {
+                a.cmd = "keygen-rsa";
+            } else if (s == "sign") {
+                a.cmd = "sign";
+            } else if (s == "verify") {
+                a.cmd = "verify";
             } else if (s == "--bank")
                 next(a.bank);
             else if (s == "--file")
                 next(a.file);
+            else if (s == "--value")
+                next(a.value);
+            else if (s == "--signature")
+                next(a.signature);
+            else if (s == "--bits") {
+                if (i + 1 < argc) a.rsaBits = (size_t)std::stoul(argv[++i]);
+            }
             else if (s == "--codetype")
                 next(a.codeType);
             else if (s == "--action")
@@ -418,6 +449,67 @@ int MainOcr(const Args& args, const newrpa::ocr::OcrCred& cred) {
 
 // ----------------------------------------------------------------------------
 
+// 加解密自检（密钥/密钥文件全部来自 config.json 顶层 crypto 段）：
+//   encrypt / decrypt  : AES-256-CBC PKCS7 密码串
+//   keygen-rsa         : 生成 RSA 密钥对 PEM 文件
+//   sign / verify      : RSA PKCS1v15(SHA-256) 签名 / 验签
+int MainCrypt(const Args& args, const newrpa::util::GlobalConfig& cfg) {
+    const std::string aesKeyRaw = newrpa::crypto::ParseAesKeyHex(cfg.aesKeyHex);
+
+    if (args.cmd == "keygen-rsa") {
+        if (cfg.rsaPrivateKeyFile.empty() || cfg.rsaPublicKeyFile.empty()) {
+            spdlog::error("keygen-rsa: config 缺少 crypto.rsaPrivateKeyFile / rsaPublicKeyFile");
+            return 1;
+        }
+        if (!newrpa::crypto::RsaGenerateKeyPair(cfg.rsaPrivateKeyFile,
+                                                cfg.rsaPublicKeyFile, args.rsaBits))
+            return 1;
+        std::cout << "rsa key pair generated" << std::endl;
+        return 0;
+    }
+
+    if (args.value.empty()) {
+        spdlog::error("{}: 需要 --value 参数", args.cmd);
+        return 1;
+    }
+    if (args.cmd == "encrypt") {
+        if (newrpa::crypto::IsEncryptedPassword(args.value)) {
+            std::cout << args.value << std::endl;   // 已是密文，幂等返回
+            return 0;
+        }
+        const std::string enc = newrpa::crypto::EncryptPassword(args.value, aesKeyRaw);
+        if (enc.empty()) return 1;
+        std::cout << enc << std::endl;
+        return 0;
+    }
+    if (args.cmd == "decrypt") {
+        const std::string plain = newrpa::crypto::DecryptPassword(args.value, aesKeyRaw);
+        if (plain.empty() && newrpa::crypto::IsEncryptedPassword(args.value)) return 1;
+        std::cout << plain << std::endl;
+        return 0;
+    }
+    if (args.cmd == "sign") {
+        if (cfg.rsaPrivateKeyFile.empty()) {
+            spdlog::error("sign: config 缺少 crypto.rsaPrivateKeyFile");
+            return 1;
+        }
+        const std::string sig = newrpa::crypto::RsaSign(args.value, cfg.rsaPrivateKeyFile);
+        if (sig.empty()) return 1;
+        std::cout << sig << std::endl;
+        return 0;
+    }
+    // verify
+    if (cfg.rsaPublicKeyFile.empty() || args.signature.empty()) {
+        spdlog::error("verify: 需要 config crypto.rsaPublicKeyFile 和 --signature");
+        return 1;
+    }
+    const bool ok = newrpa::crypto::RsaVerify(args.value, args.signature, cfg.rsaPublicKeyFile);
+    std::cout << (ok ? "VERIFY_OK" : "VERIFY_FAIL") << std::endl;
+    return ok ? 0 : 1;
+}
+
+// ----------------------------------------------------------------------------
+
 int main(int argc, char** argv) {
 
     Args args = Args::Parse(argc, argv);
@@ -432,6 +524,11 @@ int main(int argc, char** argv) {
     if (args.cmd == "chrome") return MainChrome(args, newrpa::util::LoadConfig(args.config));
 
     auto cfg = newrpa::util::LoadConfig(args.config);
+
+    // 加解密命令（密钥来自刚加载的 cfg.crypto）
+    if (args.cmd == "encrypt" || args.cmd == "decrypt" ||
+        args.cmd == "keygen-rsa" || args.cmd == "sign" || args.cmd == "verify")
+        return MainCrypt(args, cfg);
 
     // 全局打码凭据（公共，一次设置所有插件共享）：config.json ocr 段为底，
     // 环境变量 CJY_* 优先

@@ -15,6 +15,7 @@ add_library(NewRpaCore SHARED
     src/ocr/ChaojiyingOcr.cpp        # 超级鹰打码（公共 OCR）
     src/des/xskydes.cpp              # DES 加解密（公共 crypto）
     src/des/DesBase64.cpp            # Base64 编解码（公共 crypto）
+    src/crypto/Crypto.cpp            # 公共加解密组件（Botan: AES-256-CBC PKCS7 / SHA-256）
     src/singleUsbbox/hid_box.cpp     # 单头盒子原生 HID 驱动（公共硬件层）
     src/singleUsbbox/HidKeyBoard.cpp # 硬件键盘盒子（公共硬件层）
     src/singleUsbbox/HidMouse.cpp    # 硬件鼠标盒子（公共硬件层）
@@ -28,7 +29,20 @@ target_include_directories(NewRpaCore
     # singleUsbbox/*.cpp 用裸文件名 include 同目录头（HidKeyBoard.h 等）
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include/newrpa/singleUsbbox
+        ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/botan/include
 )
+
+# Botan 3.x 静态库（third_party/botan/lib/libbotan-3.a，mingw64 x86_64）
+find_library(BOTAN_STATIC_LIB NAMES botan-3 botan
+             PATHS ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/botan/lib
+             NO_DEFAULT_PATH)
+if(NOT BOTAN_STATIC_LIB)
+    message(FATAL_ERROR "Botan static lib not found in third_party/botan/lib")
+endif()
+message(STATUS "Botan static: ${BOTAN_STATIC_LIB}")
+
+# Botan 3.x 头文件要求 C++20；工程根 CMakeLists.txt 已全局 CMAKE_CXX_STANDARD 20，
+# 无需再对 Crypto.cpp 单独升标准（保留 find_library 结果供链接）。
 
 target_compile_definitions(NewRpaCore
     PRIVATE NEWRPA_BUILD
@@ -43,7 +57,7 @@ target_link_libraries(NewRpaCore
 )
 
 if(WIN32)
-    target_link_libraries(NewRpaCore PRIVATE ws2_32 mswsock)
+    target_link_libraries(NewRpaCore PRIVATE ws2_32 mswsock ${BOTAN_STATIC_LIB})
     if(MINGW)
         # MinGW 下 CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS 不生效，必须显式导出
         target_link_options(NewRpaCore PRIVATE

@@ -37,6 +37,12 @@ struct GlobalConfig {
     std::string heartbeatUrl;
     int         heartbeatIntervalSec = 3600;
 
+    // 加解密配置（config.json 顶层 "crypto" 段）
+    // aesKey 为 64 位 hex（AES-256）；RSA 两个字段是 PEM 密钥文件路径
+    std::string aesKeyHex;
+    std::string rsaPrivateKeyFile;
+    std::string rsaPublicKeyFile;
+
     // 超级鹰打码（公共 OCR，凭据也可用环境变量 CJY_* 覆盖）
     std::string ocrUser;
     std::string ocrPass;

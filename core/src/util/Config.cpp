@@ -7,6 +7,7 @@
 #include "newrpa/io/ExcelWriter.h"
 #include "newrpa/util/StringUtils.h"
 #include "newrpa/cdp/CDPSession.h"
+#include "newrpa/crypto/Crypto.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -52,6 +53,18 @@ GlobalConfig LoadConfig(const std::string& path) {
     cfg.logLevel        = j.value("logLevel",        "info");
     cfg.logFile         = j.value("logFile",         "");
 
+    // 加解密配置（顶层 crypto 段）：AES 密钥直接配置，RSA 密钥从文件读取
+    if (j.contains("crypto") && j["crypto"].is_object()) {
+        auto& c = j["crypto"];
+        cfg.aesKeyHex         = c.value("aesKey",            "");
+        cfg.rsaPrivateKeyFile = c.value("rsaPrivateKeyFile", "");
+        cfg.rsaPublicKeyFile  = c.value("rsaPublicKeyFile",  "");
+        spdlog::info("[Config] crypto section: aesKey={}, rsaKeys={}",
+                     cfg.aesKeyHex.empty() ? "MISSING" : "set",
+                     (cfg.rsaPrivateKeyFile.empty() || cfg.rsaPublicKeyFile.empty())
+                         ? "MISSING" : "set");
+    }
+
     // 超级鹰打码（公共，凭据不进日志）
     if (j.contains("ocr") && j["ocr"].is_object()) {
         auto& o = j["ocr"];
@@ -88,6 +101,11 @@ GlobalConfig LoadConfig(const std::string& path) {
             if (s.is_string()) cfg.chromeExcludeSwitches.push_back(s.get<std::string>());
     }
 
+    // 银行登录密码 / 证书密码支持 "enc:v1:" 加密存储（AES-256-CBC PKCS7）。
+    // 主密钥来自 config.json 顶层 crypto.aesKey（不再用 crypto.key 文件）。
+    // 明文密码仍完全兼容（无前缀原样放行）。明文值不落日志。
+    const std::string aesKeyRaw = crypto::ParseAesKeyHex(cfg.aesKeyHex);
+
     auto banks = j.value("banks", json::array());
     for (auto& b : banks) {
         plugin::BankConfig bc;
@@ -110,6 +128,11 @@ GlobalConfig LoadConfig(const std::string& path) {
         bc.bankType     = b.value("bankType",     "");
         bc.chromeProfileDir = b.value("chromeProfileDir", "");
         bc.chromePort       = b.value("chromePort",   0);
+        // "enc:v1:" 密文 → 运行时解密为明文（只进内存，不落日志）
+        if (crypto::IsEncryptedPassword(bc.password))
+            bc.password = crypto::DecryptPassword(bc.password, aesKeyRaw);
+        if (crypto::IsEncryptedPassword(bc.certPassword))
+            bc.certPassword = crypto::DecryptPassword(bc.certPassword, aesKeyRaw);
         cfg.banks.push_back(std::move(bc));
     }
     return cfg;
@@ -328,7 +351,7 @@ std::string WriteCurBalCsv(
 } // namespace newrpa
 
 // ----------------------------------------------------------------------------
-// Crypto — Md5 自实现（RFC 1321，超级鹰 pass2 用）；Sha256/AES 仍为桩
+// Crypto — Md5 自实现（RFC 1321，超级鹰 pass2 用）；Sha256/AES 见 src/crypto/Crypto.cpp（Botan）
 // ----------------------------------------------------------------------------
 #include "newrpa/crypto/Crypto.h"
 
@@ -413,24 +436,7 @@ std::string Md5(const std::string& msg) {
     return std::string(out);
 }
 
-std::string Sha256(const std::string& s) {
-    spdlog::warn("[Crypto] Sha256 not implemented (stub)");
-    return "";
-}
-
-std::string AesEncrypt(const std::string& plain,
-                        const std::string& key,
-                        const std::string& iv) {
-    spdlog::warn("[Crypto] AesEncrypt not implemented (stub)");
-    return "";
-}
-
-std::string AesDecrypt(const std::string& cipher,
-                        const std::string& key,
-                        const std::string& iv) {
-    spdlog::warn("[Crypto] AesDecrypt not implemented (stub)");
-    return "";
-}
+    // Sha256 / AesEncrypt / AesDecrypt 已移至 core/src/crypto/Crypto.cpp（Botan 实现）
 
 } // namespace crypto
 } // namespace newrpa

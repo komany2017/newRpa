@@ -41,14 +41,17 @@ namespace fs = std::filesystem;
 // "Cannot convert character sequence"，统一用 UTF-8 互转
 inline fs::path U8Path(const std::string& s) {
 #ifdef _WIN32
-    return fs::u8path(s);
+    // C++20 起已弃用 fs::u8path，等价于用 UTF-8 串直接构造 path
+    return fs::path(reinterpret_cast<const char8_t*>(s.c_str()));
 #else
     return fs::path(s);
 #endif
 }
 inline std::string PathToU8(const fs::path& p) {
 #ifdef _WIN32
-    return p.u8string();
+    // C++20 起 u8string() 返回 std::u8string(char8_t)，转回 std::string
+    const auto u8 = p.u8string();
+    return std::string(u8.begin(), u8.end());
 #else
     return p.string();
 #endif
