@@ -1,7 +1,7 @@
 // 架构基础设施自检：验证 core/include/newrpa/arch 下头文件可独立编译。
 //
 // 编译方法（在工程根目录，Git Bash）：
-//   /e/Workdaddy/mingw64/bin/g++.exe -std=c++17 -fsyntax-only \
+//   /e/Workdaddy/mingw64/bin/g++.exe -std=c++20 -fsyntax-only \
 //     -Icore/include -Ithird_party/nlohmann_json/include tools/arch_selftest.cpp
 //
 // 本文件不参与 CMake 构建，仅作为架构层的可编译示例与回归检查。

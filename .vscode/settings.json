@@ -21,7 +21,7 @@
     "C_Cpp.default.compilerPath": "E:/Workdaddy/mingw64/bin/g++.exe",
     "C_Cpp.default.intelliSenseMode": "windows-gcc-x64",
     "C_Cpp.default.cStandard": "c17",
-    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.cppStandard": "c++20",
     // 编译数据库：跳转/查找引用的唯一权威来源（CMakeLists 里
     // CMAKE_EXPORT_COMPILE_COMMANDS=ON，每次 configure 自动刷新）
     "C_Cpp.default.compileCommands": "${workspaceFolder}/build-mingw/compile_commands.json",
@@ -95,7 +95,7 @@
         "-lwinhttp"
     ],
     "cppBuildMenu.compileArgs": [
-        "-std=c++17", "-pthread", "-g",
+        "-std=c++20", "-pthread", "-g",
         "-D_WIN32", "-DNOMINMAX", "-DWIN32_LEAN_AND_MEAN", "-DUNICODE", "-D_UNICODE",
         "-DNEWRPA_USE_DLL", "-DSPDLOG_COMPILED_LIB"
     ],
