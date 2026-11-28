@@ -83,6 +83,24 @@
     // 自动全量格式化会产生大量无关 diff。需要时用 Shift+Alt+F 手动格式化当前文件。
     "editor.formatOnSave": false,
 
+    // --- C++ Build Menu 扩展：右键单文件直接生成可执行文件 ---
+    // main.cpp 依赖 BankCommands.cpp 的实现，需一并参与链接
+    "cppBuildMenu.singleFileMode": "exe",
+    "cppBuildMenu.singleFileExtraSources": [
+        "app/commands/BankCommands.cpp"
+    ],
+    "cppBuildMenu.linkArgs": [
+        "-L${workspaceFolder}/build-mingw/lib",
+        "-lNewRpaCore",
+        "-lwinhttp"
+    ],
+    "cppBuildMenu.compileArgs": [
+        "-std=c++17", "-pthread", "-g",
+        "-D_WIN32", "-DNOMINMAX", "-DWIN32_LEAN_AND_MEAN", "-DUNICODE", "-D_UNICODE",
+        "-DNEWRPA_USE_DLL", "-DSPDLOG_COMPILED_LIB"
+    ],
+    "cppBuildMenu.singleFileOutputFile": "${workspaceFolder}/build-mingw/bin/newrpa.exe",
+
     // --- 编码：源文件为 UTF-8 无 BOM（含中文注释），强制按 UTF-8 打开 ---
     "files.encoding": "utf8",
     "files.autoGuessEncoding": false,
