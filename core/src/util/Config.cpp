@@ -62,11 +62,20 @@ static GlobalConfig ParseConfigJson(const std::string& jsonText) {
                          ? "MISSING" : "set");
     }
 
+    // 统一派生 AES 主密钥（来自 config 顶层 crypto.aesKey），供 OCR 与银行密码解密共用。
+    // 明文值仍完全兼容（无 enc:v1: 前缀原样放行）。明文不落日志。
+    const std::string aesKeyRaw = crypto::ParseAesKeyHex(cfg.aesKeyHex);
+
     // 超级鹰打码（公共，凭据不进日志）
     if (j.contains("ocr") && j["ocr"].is_object()) {
         auto& o = j["ocr"];
         cfg.ocrUser     = o.value("user",     "");
         cfg.ocrPass     = o.value("pass",     "");
+        // 账户/密码支持 enc:v1: 加密存储，使用前解密
+        if (crypto::IsEncryptedPassword(cfg.ocrUser))
+            cfg.ocrUser = crypto::DecryptPassword(cfg.ocrUser, aesKeyRaw);
+        if (crypto::IsEncryptedPassword(cfg.ocrPass))
+            cfg.ocrPass = crypto::DecryptPassword(cfg.ocrPass, aesKeyRaw);
         cfg.ocrSoftId   = o.value("softid",   "");
         cfg.ocrUrl      = o.value("url",      "");
         cfg.ocrCodeType = o.value("codetype", "");
@@ -97,11 +106,6 @@ static GlobalConfig ParseConfigJson(const std::string& jsonText) {
         for (auto& s : j["chromeExcludeSwitches"])
             if (s.is_string()) cfg.chromeExcludeSwitches.push_back(s.get<std::string>());
     }
-
-    // 银行登录密码 / 证书密码支持 "enc:v1:" 加密存储（AES-256-CBC PKCS7）。
-    // 主密钥来自 config.json 顶层 crypto.aesKey（不再用 crypto.key 文件）。
-    // 明文密码仍完全兼容（无前缀原样放行）。明文值不落日志。
-    const std::string aesKeyRaw = crypto::ParseAesKeyHex(cfg.aesKeyHex);
 
     auto banks = j.value("banks", json::array());
     for (auto& b : banks) {
